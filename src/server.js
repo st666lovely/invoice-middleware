@@ -516,8 +516,8 @@ app.post("/api/urgent-invoice", urgentInvoiceLimit, upload.single("image"), asyn
     return res.status(400).json({ ok: false, error: "Thiếu tài khoản, mã giao dịch hoặc ảnh hóa đơn" });
   }
 
-  const token = process.env.URGENT_TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.URGENT_TG_GROUP_ID || process.env.TELEGRAM_GROUP_ID;
+  const token = process.env.8774011386:AAGSKw7CPqD8H0yhDBKQouWr7V9gqTCvV3E || process.env.8774011386:AAGSKw7CPqD8H0yhDBKQouWr7V9gqTCvV3E;
+  const chatId = process.env.-1003943413541 || process.env.-1003943413541;
 
   if (!token || !chatId) {
     logger.error("Urgent Telegram config missing");

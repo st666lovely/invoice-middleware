@@ -95,26 +95,42 @@ async function searchDeposits(username, dayRange = 7) {
   const starttime = new Date(dateFrom + "T00:00:00+07:00").getTime();
   const endtime   = new Date(dateTo   + "T23:59:59.999+07:00").getTime();
 
-  const res = await axios.get(`${BASE}/deposits/search`, {
-    params: {
-      dateFrom,
-      dateTo,
-      starttime,
-      endtime,
-      playerid:    username,
-      exactmatch:  true,
-      statusType:  "DEPOSIT_AUDIT",
-      zoneType:    zone,
-      timefilter:  "deposittime",
-      sortcolumn:  "deposittime",
-      sort:        "DESC",
-      limit:       100,
-      offset:      0,
-      language:    1,
-    },
-    headers: buildHeaders(token),
-    timeout: 12_000,
-  });
+  const params = {
+    dateFrom,
+    dateTo,
+    starttime,
+    endtime,
+    playerid:    username,
+    exactmatch:  true,
+    statusType:  "DEPOSIT_AUDIT",
+    zoneType:    zone,
+    timefilter:  "deposittime",
+    sortcolumn:  "deposittime",
+    sort:        "DESC",
+    limit:       100,
+    offset:      0,
+    language:    1,
+  };
+
+  logger.info("ST666 search request", { url: `${BASE}/deposits/search`, params });
+
+  let res;
+  try {
+    res = await axios.get(`${BASE}/deposits/search`, {
+      params,
+      headers: buildHeaders(token),
+      timeout: 12_000,
+    });
+  } catch (e) {
+    logger.error("ST666 search HTTP error", {
+      status:   e.response?.status,
+      data:     JSON.stringify(e.response?.data).slice(0, 300),
+      username,
+    });
+    throw e;
+  }
+
+  logger.info("ST666 search response", { status: res.status, dataType: typeof res.data, isArray: Array.isArray(res.data) });
 
   const raw = res.data;
   if (Array.isArray(raw))           return raw;

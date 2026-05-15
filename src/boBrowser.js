@@ -78,6 +78,7 @@ async function fetchDepositRemarkByUsername(username) {
   if (!username) return null;
 
   let browser;
+  let page;
 
   try {
     browser = await chromium.launch({
@@ -99,7 +100,7 @@ async function fetchDepositRemarkByUsername(username) {
       timezoneId: "Asia/Ho_Chi_Minh",
     });
 
-    const page = await context.newPage();
+    page = await context.newPage();
 
     logger.info("BO browser open login");
     await page.goto(BO_LOGIN_URL, {
@@ -237,17 +238,24 @@ async function fetchDepositRemarkByUsername(username) {
     logger.info("BO browser remark result", { username, remark });
 
     return remark || null;
-  } catch (err) {
-    logger.error("BO browser fetchDepositRemark failed", {
-      username,
-      error: err.message,
-    });
-    return null;
-  } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
-  }
+} catch (err) {
+  let debug = {};
+
+  try {
+    debug = {
+      url: page ? page.url() : null,
+      title: page ? await page.title().catch(() => "") : "",
+      html: page ? (await page.content()).slice(0, 2000) : "",
+    };
+  } catch {}
+
+  logger.error("BO browser fetchDepositRemark failed", {
+    username,
+    error: err.message,
+    ...debug,
+  });
+
+  return null;
 }
 
 module.exports = { fetchDepositRemarkByUsername };

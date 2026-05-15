@@ -8,8 +8,8 @@
 ## Render ENV cần thêm
 BO_LOGIN_URL=https://bo.bo666st.com/login
 BO_DEPOSIT_URL=https://bo.bo666st.com/depositAudit
-BO_USERNAME=invoice1
-BO_PASSWORD=invoice1
+BO_USERNAME=
+BO_PASSWORD=
 
 ## Render Build Command khuyến nghị
 npm install && npx playwright install chromium

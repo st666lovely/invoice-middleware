@@ -443,7 +443,7 @@ async function handleCskhCallback(cb) {
     const note = "Đã lên điểm";
     const replyText = [
       `Ngày: ${formatVNDate()}`,
-      `ID: ${root.orderCode || root.ck_code || root.username || rootId}`,
+      `ID: ${root.username}`,
       `Ghi chú trạng thái: ${note}`,
     ].join("\n");
 

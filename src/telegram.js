@@ -196,7 +196,7 @@ function buildT3Keyboard() {
       [{ text: "✅ Đã lên điểm",    callback_data: "t3:status:Đã lên điểm" }],
       [{ text: "❌ Chưa nhận được", callback_data: "t3:status:Chưa nhận được" }],
       [{ text: "⚠️ Sai số tiền",    callback_data: "t3:status:Sai số tiền" }],
-      [{ text: "🔄 Sai ngân hàng",  callback_data: "t3:status:Sai ngân hàng" }],
+      [{ text: "🔄 Sai ngân hàng/người nhận",  callback_data: "t3:status:Sai ngân hàng" }],
       [{ text: "✏️ Khác",           callback_data: "t3:status:Khác" }],
     ],
   };
@@ -518,7 +518,7 @@ const DEFAULT_NOTES = {
   "Đã lên điểm":    "Thanh toán đã cập nhật vào tài khoản, quý khách vui lòng kiểm tra số dư. Xin cảm ơn",
   "Chưa nhận được": "Thanh toán chưa nhận được, tiếp tục đối soát và kiểm tra đến khi có thông báo mới",
   "Sai số tiền":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
-  "Sai ngân hàng":  "Ngân hàng nhận trên hóa đơn không thuộc ST666, khách hàng cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
+  "Sai ngân hàng/người nhận":  "Ngân hàng nhận trên hóa đơn không thuộc ST666, quý khách cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
 };
 
 async function handleT3Callback(cb) {

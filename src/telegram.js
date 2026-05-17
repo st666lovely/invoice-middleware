@@ -193,11 +193,11 @@ function buildCskhKeyboard() {
 function buildT3Keyboard() {
   return {
     inline_keyboard: [
-      [{ text: "✅ Đã lên điểm",    callback_data: "t3:status:Đã lên điểm" }],
-      [{ text: "❌ Chưa nhận được", callback_data: "t3:status:Chưa nhận được" }],
-      [{ text: "⚠️ Sai số tiền",    callback_data: "t3:status:Sai số tiền" }],
-      [{ text: "🔄 Sai ngân hàng/người nhận",  callback_data: "t3:status:Sai ngân hàng/người nhận" }],
-      [{ text: "✏️ Khác",           callback_data: "t3:status:Khác" }],
+      [{ text: "✅ Đã lên điểm | 已上分",    callback_data: "t3:status:Đã lên điểm" }],
+      [{ text: "❌ Chưa nhận được | 尚未收到", callback_data: "t3:status:Chưa nhận được" }],
+      [{ text: "⚠️ Lệnh không khớp số tiền | 訂單金額不符",    callback_data: "t3:status:Lệnh không khớp số tiền" }],
+      [{ text: "🔄 Sai ngân hàng/người nhận | 銀行／收款人錯誤",  callback_data: "t3:status:Sai ngân hàng/người nhận" }],
+      [{ text: "✏️ Khác | 其他",   callback_data: "t3:status:Khác" }],
     ],
   };
 }
@@ -515,10 +515,10 @@ async function handleCskhCallback(cb) {
 
 // Ghi chú mặc định cho từng trạng thái — chỉ "Khác" mới cần nhập thủ công
 const DEFAULT_NOTES = {
-  "Đã lên điểm":    "Thanh toán đã cập nhật vào tài khoản, quý khách vui lòng kiểm tra số dư. Xin cảm ơn",
-  "Chưa nhận được": "Thanh toán chưa nhận được, tiếp tục đối soát và kiểm tra đến khi có thông báo mới",
-  "Sai số tiền":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
-  "Sai ngân hàng/người nhận":  "Ngân hàng/người nhận trên hóa đơn không thuộc ST666, khách hàng cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
+  "Đã lên điểm | 已上分":    "Thanh toán đã cập nhật vào tài khoản, quý khách vui lòng kiểm tra số dư. Xin cảm ơn",
+  "Chưa nhận được | 尚未收到": "Thanh toán chưa nhận được, tiếp tục đối soát và kiểm tra đến khi có thông báo mới",
+  "Lệnh không khớp số tiền | 訂單金額不符":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
+  "Sai ngân hàng/người nhận | 銀行／收款人錯誤":  "Ngân hàng/người nhận trên hóa đơn không thuộc ST666, khách hàng cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
 };
 
 async function handleT3Callback(cb) {
@@ -535,7 +535,7 @@ async function handleT3Callback(cb) {
     pendingT3.set(Number(cb.from.id), { ...link, t3MsgId, status });
     await sendTelegramMessage({
       chat_id: msg.chat.id,
-      text: "Vui lòng nhập ghi chú:",
+      text: "Vui lòng nhập ghi chú | 請輸入備註:",
       reply_to_message_id: t3MsgId,
     });
     return answerCallbackQuery(cb.id, "Nhập ghi chú để gửi về CSKH");

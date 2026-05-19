@@ -96,7 +96,7 @@ async function getToken() {
   return login();
 }
 
-function getDateParts(dayRange = 1) {
+function getDateParts(dayRange = 7) {
   const now = Date.now();
   const start = new Date(now - dayRange * 86400000);
   const end = new Date(now + 86400000);
@@ -123,7 +123,7 @@ function normalizeList(raw) {
   return [];
 }
 
-async function searchDeposits(username, dayRange = 1) {
+async function searchDeposits(username, dayRange = 7) {
   const token = await getToken();
   const { dateFrom, dateTo, starttime, endtime } = getDateParts(dayRange);
 

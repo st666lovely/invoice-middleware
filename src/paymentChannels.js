@@ -2,7 +2,7 @@
 
 // Mapping prefix mã đơn → Group ID Telegram của kênh T3
 const PAYMENT_CHANNEL_MAP = {
-  "N33PAY":   "-1003960030669",
+  "N33PAY":   "-5254981126",
   "AOPAY":    "-4566163238",
   "AQPAY":    "-5233602433",
   "DZPAYVN":  "-4826708945",
@@ -16,7 +16,7 @@ const PAYMENT_CHANNEL_MAP = {
   "RMPAY":    "-1003770890341",   // RM PAY
   "SGPAY":    "-5247614268",
   "SPPAY":    "-1003716238196",
-  "THUYPAY": "-5254981126",   // THUYPHATPAY
+  "THUYPAY": "-525498112243",   // THUYPHATPAY
   "V8PAY":    "-1002392090513",
   "YOUPAYS":  "-1003761701169",
 };

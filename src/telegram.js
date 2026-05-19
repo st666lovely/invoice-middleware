@@ -441,9 +441,9 @@ async function handleCskhCallback(cb) {
   if (cb.data === "cskh:done") {
     const note = "Đã lên điểm";
     const replyText = [
-      `Ngày: ${formatVNDate()}`,
-      `ID: ${root.username}`,
-      `Ghi chú trạng thái: ${note}`,
+      `${formatVNDate()}`,
+      `${root.username}`,
+      `${note}`,
     ].join("\n");
 
     const sent = await sendTelegramMessage({

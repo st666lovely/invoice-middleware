@@ -7,8 +7,6 @@ const PAYMENT_CHANNEL_MAP = {
   "SPPAY":    "-1003716238196",
   "THUYPAY": "-1003828299681",   // THUYPHATPAY
   "YOUPAYS":  "-1003761701169",
-  "THUPAY":  "-1003960030669",
-  "N3PAY":  "-1003954942976"
 };
 
 // Tập hợp tất cả Group ID của T3 (để nhận dạng tin nhắn từ nhóm T3)

@@ -2,6 +2,7 @@
 require("dotenv").config();
 const express  = require("express");
 const axios    = require("axios");
+const path     = require("path");
 const FormData = require("form-data");
 const cors     = require("cors");
 const helmet   = require("helmet");
@@ -27,9 +28,9 @@ const PORT = process.env.PORT || 3000;
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: "*" }));
+app.use(express.static(path.join(__dirname, "public")));  // ← thêm vào đây
 app.use(express.json({ limit: "20kb" }));
 app.use("/webhook", rateLimit({ windowMs: 60000, max: 200, standardHeaders: true, legacyHeaders: false }));
-
 // ── Logs ──────────────────────────────────────────────────────────────────────
 const recentLogs = [];
 const _origInfo  = logger.info.bind(logger);

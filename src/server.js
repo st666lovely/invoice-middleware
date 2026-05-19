@@ -26,7 +26,7 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.set("trust proxy", 1);
-app.use(helmet());
+app.use(helmet({contentSecurityPolicy: false,}));;
 app.use(cors({ origin: "*" }));
 app.use(express.static(path.join(__dirname, "public")));  // ← thêm vào đây
 app.use(express.json({ limit: "20kb" }));

@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ST666 · Admin Panel</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #080b12;
+  --surface:  #0e1220;
+  --surface2: #141825;
+  --surface3: #1b2033;
+  --border:   rgba(255,255,255,.06);
+  --border2:  rgba(255,255,255,.11);
+  --text:     #e8ecf5;
+  --muted:    #5a6480;
+  --muted2:   #8892aa;
+  --accent:   #4f8ef7;
+  --accent2:  #2563eb;
+  --green:    #10b981;
+  --orange:   #f59e0b;
+  --red:      #ef4444;
+  --purple:   #8b5cf6;
+  --ag:       rgba(79,142,247,.15);
+  --gg:       rgba(16,185,129,.15);
+  --rg:       rgba(239,68,68,.12);
+  --og:       rgba(245,158,11,.12);
+}
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+html { scroll-behavior:smooth; }
+body {
+  font-family:'DM Sans',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  font-size:14px;
+  line-height:1.5;
+}
+body::before {
+  content:'';
+  position:fixed; inset:0;
+  background:
+    radial-gradient(ellipse 60% 50% at 0% 0%, rgba(37,99,235,.08) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(16,185,129,.06) 0%, transparent 60%);
+  pointer-events:none; z-index:0;
+}
+
+/* ── Layout ── */
+.root { position:relative; z-index:1; display:flex; min-height:100vh; }
+
+/* ── Sidebar ── */
+.sidebar {
+  width:220px; flex-shrink:0;
+  background:var(--surface);
+  border-right:1px solid var(--border);
+  display:flex; flex-direction:column;
+  position:fixed; top:0; left:0; height:100vh;
+  z-index:100;
+}
+.sb-logo {
+  padding:20px 18px 16px;
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:10px;
+}
+.sb-logo-icon {
+  width:32px; height:32px;
+  border-radius:9px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:grid; place-items:center;
+  font-size:15px;
+  box-shadow:0 4px 14px rgba(37,99,235,.4);
+  flex-shrink:0;
+}
+.sb-logo-text { font-size:13px; font-weight:700; letter-spacing:-.01em; }
+.sb-logo-sub  { font-size:11px; color:var(--muted); margin-top:1px; }
+
+.sb-nav { padding:10px 8px; flex:1; overflow-y:auto; }
+.sb-section { font-size:10px; font-weight:700; color:var(--muted); letter-spacing:.1em; text-transform:uppercase; padding:10px 10px 6px; }
+.nav-item {
+  display:flex; align-items:center; gap:10px;
+  padding:9px 10px; border-radius:10px;
+  cursor:pointer; color:var(--muted2);
+  transition:all .18s; border:1px solid transparent;
+  font-size:13px; font-weight:500;
+  margin-bottom:2px;
+  -webkit-tap-highlight-color:transparent;
+}
+.nav-item:hover  { background:var(--surface2); color:var(--text); }
+.nav-item.active { background:var(--ag); border-color:rgba(79,142,247,.3); color:var(--text); }
+.nav-item .icon  { font-size:15px; width:18px; text-align:center; flex-shrink:0; }
+.nav-badge {
+  margin-left:auto;
+  background:var(--red); color:#fff;
+  font-size:10px; font-weight:700;
+  padding:2px 6px; border-radius:999px;
+  min-width:18px; text-align:center;
+}
+
+.sb-bottom {
+  padding:12px 8px;
+  border-top:1px solid var(--border);
+}
+.config-btn {
+  display:flex; align-items:center; gap:8px;
+  padding:9px 10px; border-radius:10px;
+  cursor:pointer; color:var(--muted2);
+  font-size:13px; font-weight:500;
+  transition:all .18s;
+  background:none; border:none; width:100%;
+}
+.config-btn:hover { background:var(--surface2); color:var(--text); }
+
+/* ── Main ── */
+.main { margin-left:220px; flex:1; min-height:100vh; }
+.topbar {
+  padding:16px 28px;
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between;
+  background:rgba(14,18,32,.8);
+  backdrop-filter:blur(12px);
+  position:sticky; top:0; z-index:50;
+}
+.topbar-title { font-size:16px; font-weight:700; letter-spacing:-.02em; }
+.topbar-right  { display:flex; align-items:center; gap:10px; }
+.server-status {
+  display:flex; align-items:center; gap:7px;
+  font-size:12px; font-weight:600; color:var(--muted);
+  padding:6px 12px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:999px;
+}
+.server-dot { width:7px; height:7px; border-radius:50%; background:var(--muted); transition:all .3s; }
+.server-dot.online  { background:var(--green); box-shadow:0 0 6px var(--green); }
+.server-dot.offline { background:var(--red);   box-shadow:0 0 6px var(--red); }
+
+.refresh-btn {
+  display:flex; align-items:center; gap:6px;
+  padding:7px 14px; border-radius:10px;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  color:var(--muted2); font-size:12px; font-weight:600;
+  cursor:pointer; transition:all .18s;
+}
+.refresh-btn:hover { color:var(--text); border-color:rgba(255,255,255,.18); }
+
+/* ── Pages ── */
+.page { display:none; padding:24px 28px 40px; }
+.page.active { display:block; animation:fadeUp .2s ease; }
+@keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+
+.page-head { margin-bottom:24px; }
+.page-title { font-size:22px; font-weight:700; letter-spacing:-.03em; }
+.page-sub   { color:var(--muted2); font-size:13px; margin-top:4px; }
+
+/* ── Stat cards ── */
+.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:24px; }
+.stat-card {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:14px; padding:18px 20px;
+  position:relative; overflow:hidden;
+  transition:border-color .2s;
+}
+.stat-card:hover { border-color:var(--border2); }
+.stat-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background:linear-gradient(90deg, transparent, var(--accent-c,var(--accent)), transparent);
+  opacity:0; transition:opacity .3s;
+}
+.stat-card:hover::before { opacity:1; }
+.stat-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; margin-bottom:10px; }
+.stat-value { font-size:24px; font-weight:700; font-family:'DM Mono',monospace; letter-spacing:-.03em; }
+.stat-icon  { position:absolute; right:16px; top:50%; transform:translateY(-50%); font-size:26px; opacity:.08; }
+
+/* ── Cards ── */
+.card {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:16px;
+  overflow:hidden;
+  margin-bottom:16px;
+}
+.card-head {
+  padding:14px 18px;
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between;
+  background:var(--surface2);
+}
+.card-title { font-size:13px; font-weight:700; display:flex; align-items:center; gap:8px; }
+.card-body  { padding:18px; }
+
+/* ── Logs ── */
+.log-list { font-family:'DM Mono',monospace; font-size:12px; line-height:1.7; max-height:420px; overflow-y:auto; }
+.log-entry { display:flex; gap:12px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,.03); }
+.log-entry:last-child { border-bottom:none; }
+.log-time  { color:var(--muted); white-space:nowrap; flex-shrink:0; }
+.log-level { font-weight:700; width:40px; flex-shrink:0; }
+.log-level.info  { color:var(--accent); }
+.log-level.error { color:var(--red); }
+.log-level.warn  { color:var(--orange); }
+.log-msg   { color:var(--text); flex:1; word-break:break-all; }
+.log-meta  { color:var(--muted2); font-size:11px; }
+
+/* ── Cache table ── */
+.cache-filters {
+  display:flex; gap:10px; margin-bottom:14px;
+  flex-wrap:wrap;
+}
+.search-box {
+  flex:1; min-width:200px;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  border-radius:10px; padding:9px 14px;
+  font:inherit; font-size:13px; color:var(--text);
+  outline:none; transition:all .18s;
+}
+.search-box::placeholder { color:var(--muted); }
+.search-box:focus { border-color:rgba(79,142,247,.5); box-shadow:0 0 0 3px var(--ag); }
+
+.filter-btn {
+  padding:8px 14px; border-radius:10px;
+  border:1px solid var(--border2);
+  background:var(--surface2);
+  color:var(--muted2); font-size:12px; font-weight:600;
+  cursor:pointer; transition:all .18s;
+}
+.filter-btn:hover,.filter-btn.active { border-color:rgba(79,142,247,.4); color:var(--accent); background:var(--ag); }
+
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th {
+  text-align:left; padding:10px 14px;
+  font-size:11px; font-weight:700;
+  color:var(--muted); text-transform:uppercase; letter-spacing:.06em;
+  border-bottom:1px solid var(--border);
+  white-space:nowrap;
+}
+td {
+  padding:11px 14px;
+  border-bottom:1px solid var(--border);
+  vertical-align:top;
+}
+tr:last-child td { border-bottom:none; }
+tr:hover td { background:rgba(255,255,255,.02); }
+.mono { font-family:'DM Mono',monospace; font-size:12px; }
+
+/* ── Badges ── */
+.badge {
+  display:inline-flex; align-items:center; gap:4px;
+  padding:3px 9px; border-radius:999px;
+  font-size:11px; font-weight:700;
+}
+.badge-green  { background:var(--gg);  color:var(--green);  border:1px solid rgba(16,185,129,.25); }
+.badge-orange { background:var(--og);  color:var(--orange); border:1px solid rgba(245,158,11,.25); }
+.badge-red    { background:var(--rg);  color:var(--red);    border:1px solid rgba(239,68,68,.25); }
+.badge-blue   { background:var(--ag);  color:var(--accent); border:1px solid rgba(79,142,247,.25); }
+.badge-muted  { background:var(--surface3); color:var(--muted2); border:1px solid var(--border2); }
+
+/* ── Action buttons ── */
+.btn {
+  display:inline-flex; align-items:center; gap:6px;
+  padding:9px 16px; border-radius:10px;
+  font:inherit; font-size:13px; font-weight:600;
+  cursor:pointer; transition:all .18s; border:0;
+}
+.btn-primary {
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#fff;
+  box-shadow:0 4px 16px rgba(37,99,235,.3);
+}
+.btn-primary:hover { transform:translateY(-1px); box-shadow:0 6px 20px rgba(37,99,235,.4); }
+.btn-primary:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+.btn-ghost {
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  color:var(--muted2);
+}
+.btn-ghost:hover { color:var(--text); border-color:var(--border2); background:var(--surface3); }
+.btn-danger {
+  background:rgba(239,68,68,.1);
+  border:1px solid rgba(239,68,68,.2);
+  color:#f87171;
+}
+.btn-danger:hover { background:rgba(239,68,68,.18); }
+
+/* ── Config modal ── */
+.modal-overlay {
+  position:fixed; inset:0; z-index:999;
+  background:rgba(0,0,0,.75);
+  backdrop-filter:blur(6px);
+  display:flex; align-items:center; justify-content:center;
+  animation:fadeIn .18s ease;
+}
+@keyframes fadeIn { from{opacity:0} to{opacity:1} }
+.modal {
+  background:var(--surface);
+  border:1px solid var(--border2);
+  border-radius:18px; padding:28px;
+  width:min(480px,calc(100vw - 40px));
+  box-shadow:0 20px 60px rgba(0,0,0,.5);
+  animation:slideUp .22s ease;
+}
+@keyframes slideUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:none} }
+.modal-title { font-size:17px; font-weight:700; margin-bottom:6px; }
+.modal-sub   { color:var(--muted2); font-size:13px; margin-bottom:20px; }
+.field-group { margin-bottom:16px; }
+.field-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; margin-bottom:7px; display:block; }
+.field-input {
+  width:100%;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  border-radius:10px; padding:11px 14px;
+  font:inherit; font-size:14px; color:var(--text);
+  outline:none; transition:all .18s;
+}
+.field-input:focus { border-color:rgba(79,142,247,.5); box-shadow:0 0 0 3px var(--ag); }
+.field-input::placeholder { color:var(--muted); }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:20px; }
+
+/* ── Activity chart ── */
+.mini-chart { display:flex; align-items:flex-end; gap:3px; height:40px; }
+.bar-col {
+  flex:1; background:var(--accent); border-radius:3px 3px 0 0; opacity:.7;
+  transition:opacity .2s; min-width:4px; cursor:pointer;
+}
+.bar-col:hover { opacity:1; }
+
+/* ── Inline form (add status) ── */
+.inline-form {
+  display:flex; gap:10px; flex-wrap:wrap;
+  background:var(--surface2);
+  border:1px solid var(--border);
+  border-radius:12px; padding:14px;
+  margin-bottom:16px;
+}
+.inline-form .field-input { flex:1; min-width:140px; }
+.status-list { display:flex; flex-wrap:wrap; gap:8px; }
+.status-tag {
+  display:flex; align-items:center; gap:6px;
+  background:var(--surface2); border:1px solid var(--border2);
+  border-radius:8px; padding:5px 10px;
+  font-size:12px; font-weight:600;
+}
+.status-tag .del { cursor:pointer; color:var(--muted); transition:color .15s; }
+.status-tag .del:hover { color:var(--red); }
+
+/* ── Toast ── */
+.toast {
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  z-index:9999;
+  background:var(--surface2); border:1px solid var(--border2);
+  border-radius:12px; padding:11px 18px;
+  font-size:13px; font-weight:600; color:var(--text);
+  box-shadow:0 8px 28px rgba(0,0,0,.5);
+  animation:toastIn .25s ease;
+  white-space:nowrap; pointer-events:none;
+}
+@keyframes toastIn { from{opacity:0;transform:translateX(-50%) translateY(10px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
+
+/* ── Spinner ── */
+.spin { width:14px; height:14px; border:2px solid rgba(255,255,255,.2); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; display:inline-block; }
+@keyframes spin { to{transform:rotate(360deg)} }
+
+/* ── Empty state ── */
+.empty { text-align:center; padding:40px 20px; color:var(--muted); }
+.empty-icon { font-size:32px; opacity:.3; margin-bottom:10px; }
+.empty-text { font-size:14px; }
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .sidebar { transform:translateX(-100%); transition:transform .25s; }
+  .sidebar.open { transform:none; }
+  .main { margin-left:0; }
+  .stats-grid { grid-template-columns:1fr 1fr; }
+  .page { padding:20px; }
+  .topbar { padding:12px 20px; }
+}
+@media(max-width:500px){
+  .stats-grid { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="root">
+  <!-- ── Sidebar ── -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sb-logo">
+      <div class="sb-logo-icon">📊</div>
+      <div>
+        <div class="sb-logo-text">ST666 Admin</div>
+        <div class="sb-logo-sub">Invoice Middleware</div>
+      </div>
+    </div>
+    <div class="sb-nav">
+      <div class="sb-section">Tổng quan</div>
+      <div class="nav-item active" data-page="dashboard">
+        <span class="icon">🏠</span>Dashboard
+      </div>
+      <div class="nav-item" data-page="logs">
+        <span class="icon">📋</span>Logs hệ thống
+        <span class="nav-badge" id="errBadge" style="display:none">0</span>
+      </div>
+      <div class="sb-section">Dữ liệu</div>
+      <div class="nav-item" data-page="cache">
+        <span class="icon">🗂️</span>Cache hóa đơn
+      </div>
+      <div class="nav-item" data-page="search">
+        <span class="icon">🔍</span>Tra cứu nhanh
+      </div>
+      <div class="sb-section">Quản lý</div>
+      <div class="nav-item" data-page="status">
+        <span class="icon">🏷️</span>Trạng thái từ khóa
+      </div>
+      <div class="nav-item" data-page="actions">
+        <span class="icon">⚡</span>Thao tác nhanh
+      </div>
+    </div>
+    <div class="sb-bottom">
+      <button class="config-btn" onclick="openConfig()">
+        <span style="font-size:15px">⚙️</span>
+        Cấu hình server
+      </button>
+    </div>
+  </nav>
+
+  <!-- ── Main ── -->
+  <div class="main">
+    <!-- Topbar -->
+    <div class="topbar">
+      <div style="display:flex;align-items:center;gap:12px">
+        <button onclick="toggleSidebar()" style="display:none;background:none;border:none;color:var(--muted2);cursor:pointer;font-size:20px;line-height:1;padding:2px" id="menuBtn">☰</button>
+        <div class="topbar-title" id="pageTitle">Dashboard</div>
+      </div>
+      <div class="topbar-right">
+        <div class="server-status">
+          <div class="server-dot" id="serverDot"></div>
+          <span id="serverStatusTxt">Chưa kết nối</span>
+        </div>
+        <button class="refresh-btn" onclick="refreshCurrent()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-8.49"/></svg>
+          Làm mới
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Page: Dashboard ── -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-head">
+        <div class="page-title">Tổng quan hệ thống</div>
+        <div class="page-sub">Số liệu real-time từ invoice middleware server</div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card" style="--accent-c:var(--green)">
+          <div class="stat-label">Cache hóa đơn</div>
+          <div class="stat-value" id="s-cacheSize">—</div>
+          <div class="stat-icon">🗂️</div>
+        </div>
+        <div class="stat-card" style="--accent-c:var(--orange)">
+          <div class="stat-label">Uptime</div>
+          <div class="stat-value" id="s-uptime">—</div>
+          <div class="stat-icon">⏱️</div>
+        </div>
+        <div class="stat-card" style="--accent-c:var(--purple)">
+          <div class="stat-label">Memory dùng</div>
+          <div class="stat-value" id="s-memory">—</div>
+          <div class="stat-icon">💾</div>
+        </div>
+        <div class="stat-card" style="--accent-c:var(--accent)">
+          <div class="stat-label">Cache TTL còn lại</div>
+          <div class="stat-value" id="s-ttl">—</div>
+          <div class="stat-icon">🕐</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <!-- Recent errors -->
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">⚠️ Lỗi gần đây</div>
+            <span id="errCount" class="badge badge-muted">0</span>
+          </div>
+          <div class="card-body" style="padding:0">
+            <div id="recentErrors" class="log-list" style="padding:12px 16px;max-height:240px">
+              <div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Không có lỗi</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cache breakdown -->
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">📈 Cache theo trạng thái</div>
+          </div>
+          <div class="card-body">
+            <div id="cacheBreakdown">
+              <div class="empty"><div class="empty-icon">🗂️</div><div class="empty-text">Chưa load dữ liệu</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Last refresh -->
+      <div style="text-align:center;margin-top:16px;font-size:12px;color:var(--muted)">
+        Cập nhật lần cuối: <span id="lastRefresh">—</span>
+        &nbsp;·&nbsp; Tự động làm mới mỗi 30 giây
+      </div>
+    </div>
+
+    <!-- ── Page: Logs ── -->
+    <div class="page" id="page-logs">
+      <div class="page-head">
+        <div class="page-title">Logs hệ thống</div>
+        <div class="page-sub">100 log entries gần nhất</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">📋 Log stream</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="logFilter" style="background:var(--surface3);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font:inherit;font-size:12px;color:var(--text);outline:none" onchange="applyLogFilter()">
+              <option value="all">Tất cả</option>
+              <option value="error">Chỉ lỗi</option>
+              <option value="warn">Chỉ cảnh báo</option>
+              <option value="info">Chỉ info</option>
+            </select>
+            <button class="btn btn-ghost" style="font-size:12px;padding:6px 12px" onclick="loadLogs()">🔄 Tải lại</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div id="logList" class="log-list" style="padding:12px 16px;max-height:600px">
+            <div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Chưa tải logs</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Page: Cache ── -->
+    <div class="page" id="page-cache">
+      <div class="page-head">
+        <div class="page-title">Cache hóa đơn</div>
+        <div class="page-sub">Dữ liệu hóa đơn đang được lưu trong bộ nhớ</div>
+      </div>
+
+      <div class="cache-filters">
+        <input class="search-box" id="cacheSearch" placeholder="Tìm theo username, CK code..." oninput="filterCache()">
+        <button class="filter-btn" data-status="all" onclick="setCacheFilter('all')">Tất cả</button>
+        <button class="filter-btn" data-status="ok" onclick="setCacheFilter('ok')">✅ Đã xử lý</button>
+        <button class="filter-btn" data-status="pending" onclick="setCacheFilter('pending')">⏳ Chờ</button>
+        <button class="filter-btn" data-status="error" onclick="setCacheFilter('error')">❌ Lỗi</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">🗂️ Danh sách cache</div>
+          <span id="cacheRowCount" class="badge badge-muted">0 entries</span>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>CK Code</th>
+                  <th>Trạng thái</th>
+                  <th>Ghi chú</th>
+                  <th>Thời gian</th>
+                </tr>
+              </thead>
+              <tbody id="cacheTableBody">
+                <tr><td colspan="5"><div class="empty"><div class="empty-icon">🗂️</div><div class="empty-text">Chưa tải dữ liệu</div></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Page: Search ── -->
+    <div class="page" id="page-search">
+      <div class="page-head">
+        <div class="page-title">Tra cứu nhanh</div>
+        <div class="page-sub">Kiểm tra kết quả tra cứu từ phía người dùng</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">🔍 Tra cứu hóa đơn</div>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+            <div class="field-group">
+              <label class="field-label">Username / Tài khoản</label>
+              <input class="field-input" id="sq-username" placeholder="VD: myhanh1233">
+            </div>
+            <div class="field-group">
+              <label class="field-label">Mã CK / Nội dung chuyển khoản</label>
+              <input class="field-input" id="sq-ck" placeholder="VD: THUYPAY268001234...">
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="doSearch()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            Tra cứu
+          </button>
+        </div>
+      </div>
+
+      <div id="searchResult" style="display:none" class="card">
+        <div class="card-head"><div class="card-title" id="sr-title">Kết quả</div></div>
+        <div class="card-body" id="sr-body"></div>
+      </div>
+    </div>
+
+    <!-- ── Page: Status ── -->
+    <div class="page" id="page-status">
+      <div class="page-head">
+        <div class="page-title">Trạng thái từ khóa</div>
+        <div class="page-sub">Thêm từ khóa tùy chỉnh để nhận diện trạng thái từ admin reply</div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-head"><div class="card-title">➕ Thêm trạng thái mới</div></div>
+        <div class="card-body">
+          <div class="inline-form">
+            <input class="field-input" id="st-kw" placeholder="Từ khóa (vd: done123)" style="max-width:180px">
+            <input class="field-input" id="st-full" placeholder="Nội dung hiển thị đầy đủ" style="flex:2">
+            <input class="field-input" id="st-emoji" placeholder="Emoji" style="max-width:80px">
+            <button class="btn btn-primary" onclick="addStatus()">Thêm</button>
+          </div>
+          <div style="font-size:12px;color:var(--muted)">
+            💡 Ví dụ: từ khóa <code style="color:var(--accent)">done</code> → "✅ Đã nhận tiền" — admin gõ "done" vào nhóm là tự cập nhật trạng thái
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">📋 Trạng thái hiện tại (runtime)</div></div>
+        <div class="card-body">
+          <div id="statusTagList" class="status-list">
+            <div class="empty" style="width:100%;padding:20px 0"><div class="empty-text">Chưa có trạng thái nào được thêm</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Page: Actions ── -->
+    <div class="page" id="page-actions">
+      <div class="page-head">
+        <div class="page-title">Thao tác nhanh</div>
+        <div class="page-sub">Các lệnh quản trị server</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="card">
+          <div class="card-head"><div class="card-title">🔄 Warmup Cache</div></div>
+          <div class="card-body">
+            <p style="color:var(--muted2);font-size:13px;margin-bottom:14px">Tải lại toàn bộ lịch sử tin nhắn từ Telegram vào bộ nhớ cache. Dùng sau khi server restart hoặc khi cache bị mất.</p>
+            <button class="btn btn-primary" id="warmupBtn" onclick="doWarmup()">
+              🔄 Chạy Warmup
+            </button>
+            <div id="warmupResult" style="margin-top:12px;font-size:12px;color:var(--muted)"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">📊 Raw Stats API</div></div>
+          <div class="card-body">
+            <p style="color:var(--muted2);font-size:13px;margin-bottom:14px">Xem raw JSON từ endpoint /admin/stats để debug chi tiết hơn.</p>
+            <button class="btn btn-ghost" onclick="viewRawStats()">📄 Xem Raw JSON</button>
+            <pre id="rawStatsOutput" style="margin-top:12px;font-size:11px;color:var(--muted2);font-family:'DM Mono',monospace;max-height:200px;overflow:auto;white-space:pre-wrap;display:none"></pre>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">🔬 Inspect Cache Entry</div></div>
+          <div class="card-body">
+            <p style="color:var(--muted2);font-size:13px;margin-bottom:14px">Xem raw data của toàn bộ cache (debug mode).</p>
+            <button class="btn btn-ghost" onclick="inspectCache()">🔬 Inspect</button>
+            <pre id="inspectOutput" style="margin-top:12px;font-size:11px;color:var(--muted2);font-family:'DM Mono',monospace;max-height:300px;overflow:auto;white-space:pre-wrap;display:none"></pre>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">🌐 Kiểm tra kết nối</div></div>
+          <div class="card-body">
+            <p style="color:var(--muted2);font-size:13px;margin-bottom:14px">Ping /health endpoint để kiểm tra server đang chạy.</p>
+            <button class="btn btn-ghost" onclick="pingHealth()">🏓 Ping Health</button>
+            <div id="pingResult" style="margin-top:12px;font-size:12px;color:var(--muted)"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Config Modal ── -->
+<div class="modal-overlay" id="configModal" style="display:none" onclick="closeConfigOutside(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-title">⚙️ Cấu hình server</div>
+    <div class="modal-sub">Điền URL và Admin Key để kết nối tới middleware server</div>
+    <div class="field-group">
+      <label class="field-label">Server URL</label>
+      <input class="field-input" id="cfg-url" placeholder="https://your-service.onrender.com">
+    </div>
+    <div class="field-group">
+      <label class="field-label">Admin API Key (x-admin-key)</label>
+      <input class="field-input" id="cfg-key" type="password" placeholder="Nhập admin key...">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeConfig()">Huỷ</button>
+      <button class="btn btn-primary" onclick="saveConfig()">💾 Lưu & kết nối</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast" style="display:none"></div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+let CFG = JSON.parse(localStorage.getItem('admin_cfg') || '{"url":"","key":""}');
+let currentPage = 'dashboard';
+let allLogs = [];
+let allCache = [];
+let cacheFilter = 'all';
+let toastT, autoRefT;
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(function(){
+  if (!CFG.url || !CFG.key) {
+    setTimeout(openConfig, 600);
+  } else {
+    refreshAll();
+    autoRefT = setInterval(refreshAll, 30000);
+  }
+  setupNav();
+  checkMobile();
+})();
+
+function checkMobile(){
+  if (window.innerWidth <= 900) {
+    document.getElementById('menuBtn').style.display = 'flex';
+  }
+}
+window.addEventListener('resize', checkMobile);
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function setupNav(){
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const page = el.dataset.page;
+      goPage(page);
+      if (window.innerWidth <= 900) document.getElementById('sidebar').classList.remove('open');
+    });
+  });
+}
+
+function toggleSidebar(){
+  document.getElementById('sidebar').classList.toggle('open');
+}
+
+const pageTitles = {
+  dashboard: 'Dashboard', logs: 'Logs hệ thống',
+  cache: 'Cache hóa đơn', search: 'Tra cứu nhanh',
+  status: 'Trạng thái từ khóa', actions: 'Thao tác nhanh'
+};
+
+function goPage(name){
+  currentPage = name;
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => {
+    n.classList.toggle('active', n.dataset.page === name);
+  });
+  document.getElementById('pageTitle').textContent = pageTitles[name] || name;
+  if (name === 'logs')    loadLogs();
+  if (name === 'cache')   loadCacheData();
+  if (name === 'actions') {};
+}
+
+function refreshCurrent(){
+  if (currentPage === 'dashboard') refreshAll();
+  else if (currentPage === 'logs') loadLogs();
+  else if (currentPage === 'cache') loadCacheData();
+  else refreshAll();
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  if (!CFG.url) throw new Error('Chưa cấu hình server URL');
+  const res = await fetch(CFG.url.replace(/\/$/, '') + path, {
+    headers: { 'x-admin-key': CFG.key, 'Content-Type': 'application/json', ...opts.headers },
+    ...opts
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ── Refresh All ────────────────────────────────────────────────────────────
+async function refreshAll(){
+  try {
+    const d = await api('/admin/stats');
+    updateServerStatus(true);
+    updateStats(d);
+    document.getElementById('lastRefresh').textContent = new Date().toLocaleTimeString('vi-VN');
+  } catch(e) {
+    updateServerStatus(false);
+    console.error('Stats error:', e.message);
+  }
+  loadRecentErrors();
+  loadCacheBreakdown();
+}
+
+function updateServerStatus(online){
+  const dot  = document.getElementById('serverDot');
+  const txt  = document.getElementById('serverStatusTxt');
+  if (online) {
+    dot.className = 'server-dot online';
+    txt.textContent = 'Online';
+  } else {
+    dot.className = 'server-dot offline';
+    txt.textContent = 'Offline';
+  }
+}
+
+function updateStats(d){
+  const cache  = d.cache || {};
+  const total  = (cache.byStatus ? Object.values(cache.byStatus).reduce((a,b)=>a+b,0) : cache.total) || 0;
+  const uptime = d.uptime || 0;
+  const h = Math.floor(uptime/3600), m = Math.floor((uptime%3600)/60);
+  const ttlHours = cache.ttlMs ? Math.floor(cache.ttlMs/3600000) : '—';
+
+  document.getElementById('s-cacheSize').textContent = total;
+  document.getElementById('s-uptime').textContent    = `${h}h ${m}m`;
+  document.getElementById('s-memory').textContent    = d.memory || '—';
+  document.getElementById('s-ttl').textContent       = ttlHours !== '—' ? ttlHours+'h' : '—';
+}
+
+async function loadRecentErrors(){
+  try {
+    const d = await api('/admin/logs?limit=100');
+    allLogs = d.logs || [];
+    const errors = allLogs.filter(l => l.level === 'error');
+    document.getElementById('errCount').textContent = errors.length;
+    const badge = document.getElementById('errBadge');
+    if (errors.length > 0) {
+      badge.style.display = ''; badge.textContent = errors.length;
+    } else {
+      badge.style.display = 'none';
+    }
+    const el = document.getElementById('recentErrors');
+    if (!errors.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Không có lỗi</div></div>';
+      return;
+    }
+    el.innerHTML = errors.slice(-10).reverse().map(logRow).join('');
+  } catch(e) {}
+}
+
+async function loadCacheBreakdown(){
+  try {
+    const d = await api('/admin/cache');
+    const cache = d.cache || {};
+    const byStatus = cache.byStatus || {};
+    if (!Object.keys(byStatus).length) {
+      document.getElementById('cacheBreakdown').innerHTML =
+        '<div class="empty"><div class="empty-icon">🗂️</div><div class="empty-text">Cache trống</div></div>';
+      return;
+    }
+    const colors = { ok:['var(--green)','badge-green'], pending:['var(--orange)','badge-orange'], error:['var(--red)','badge-red'] };
+    document.getElementById('cacheBreakdown').innerHTML =
+      Object.entries(byStatus).map(([k,v]) => {
+        const [col,cls] = colors[k] || ['var(--accent)','badge-blue'];
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:13px;font-weight:600">${k}</div>
+          <span class="badge ${cls}" style="font-family:'DM Mono',monospace">${v}</span>
+        </div>`;
+      }).join('') + `<div style="padding-top:10px;font-size:12px;color:var(--muted)">TTL: ${cache.ttlMs ? Math.floor(cache.ttlMs/3600000)+'h' : '—'}</div>`;
+  } catch(e) {}
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────
+async function loadLogs(){
+  const el = document.getElementById('logList');
+  el.innerHTML = '<div style="padding:20px;color:var(--muted);text-align:center"><span class="spin"></span> Đang tải...</div>';
+  try {
+    const d = await api('/admin/logs?limit=100');
+    allLogs = d.logs || [];
+    renderLogs();
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">❌</div><div class="empty-text">${e.message}</div></div>`;
+  }
+}
+
+function renderLogs(){
+  const filter = document.getElementById('logFilter').value;
+  const filtered = filter === 'all' ? allLogs : allLogs.filter(l => l.level === filter);
+  const el = document.getElementById('logList');
+  if (!filtered.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Không có log</div></div>';
+    return;
+  }
+  el.innerHTML = filtered.slice().reverse().map(logRow).join('');
+}
+
+function logRow(l){
+  const time = new Date(l.ts).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const meta = Object.keys(l.meta||{}).length ? JSON.stringify(l.meta) : '';
+  return `<div class="log-entry">
+    <span class="log-time">${time}</span>
+    <span class="log-level ${l.level}">${l.level.toUpperCase()}</span>
+    <div class="log-msg">${esc(l.msg||'')}${meta?`<span class="log-meta"> ${esc(meta)}</span>`:''}</div>
+  </div>`;
+}
+
+function applyLogFilter(){ renderLogs(); }
+
+// ── Cache ─────────────────────────────────────────────────────────────────
+async function loadCacheData(){
+  document.getElementById('cacheTableBody').innerHTML =
+    '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted)"><span class="spin"></span> Đang tải...</td></tr>';
+  try {
+    const d = await api('/admin/cache/inspect');
+    allCache = d.entries || d.cache || [];
+    if (!Array.isArray(allCache)) {
+      allCache = Object.values(allCache);
+    }
+    filterCache();
+  } catch(e) {
+    document.getElementById('cacheTableBody').innerHTML =
+      `<tr><td colspan="5"><div class="empty"><div class="empty-icon">❌</div><div class="empty-text">${e.message}</div></div></td></tr>`;
+  }
+}
+
+function setCacheFilter(f){
+  cacheFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.status === f));
+  filterCache();
+}
+
+function filterCache(){
+  const q = (document.getElementById('cacheSearch').value||'').toLowerCase();
+  let rows = allCache;
+  if (cacheFilter !== 'all') rows = rows.filter(r => (r.status||'').toLowerCase().includes(cacheFilter));
+  if (q) rows = rows.filter(r =>
+    (r.username||r.playerid||'').toLowerCase().includes(q) ||
+    (r.ckCode||r.ck||'').toLowerCase().includes(q) ||
+    (r.orderCode||'').toLowerCase().includes(q)
+  );
+  document.getElementById('cacheRowCount').textContent = `${rows.length} entries`;
+  if (!rows.length) {
+    document.getElementById('cacheTableBody').innerHTML =
+      '<tr><td colspan="5"><div class="empty"><div class="empty-icon">🗂️</div><div class="empty-text">Không có dữ liệu</div></div></td></tr>';
+    return;
+  }
+  const statusBadge = s => {
+    if (!s) return '<span class="badge badge-muted">—</span>';
+    const sl = s.toLowerCase();
+    if (sl.includes('xử lý') || sl.includes('ok') || sl.includes('nhận được'))
+      return `<span class="badge badge-green">✅ ${esc(s)}</span>`;
+    if (sl.includes('chưa') || sl.includes('chờ'))
+      return `<span class="badge badge-orange">⏳ ${esc(s)}</span>`;
+    if (sl.includes('lỗi') || sl.includes('error') || sl.includes('fail'))
+      return `<span class="badge badge-red">❌ ${esc(s)}</span>`;
+    return `<span class="badge badge-blue">${esc(s)}</span>`;
+  };
+  document.getElementById('cacheTableBody').innerHTML = rows.map(r => {
+    const ts = r.ts || r.updatedAt || r.createdAt;
+    const time = ts ? new Date(ts).toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'}) : '—';
+    return `<tr>
+      <td class="mono">${esc(r.username||r.playerid||'—')}</td>
+      <td class="mono" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${esc(r.ckCode||r.ck||'—')}</td>
+      <td>${statusBadge(r.status)}</td>
+      <td style="color:var(--muted2);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.note||'—')}</td>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${time}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Search ────────────────────────────────────────────────────────────────
+async function doSearch(){
+  const username = document.getElementById('sq-username').value.trim();
+  const ck       = document.getElementById('sq-ck').value.trim();
+  if (!username && !ck) { toast('⚠️ Nhập username hoặc mã CK','orange'); return; }
+  const el = document.getElementById('searchResult');
+  const body = document.getElementById('sr-body');
+  el.style.display = '';
+  body.innerHTML = '<div style="color:var(--muted)"><span class="spin"></span> Đang tra cứu...</div>';
+  try {
+    const params = new URLSearchParams();
+    if (username) params.set('username', username);
+    if (ck)       params.set('transferContent', ck);
+    const baseUrl = CFG.url.replace(/\/$/,'');
+    const res = await fetch(`${baseUrl}/api/check-invoice`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username: username||undefined, transferContent: ck||undefined })
+    });
+    const d = await res.json();
+    if (d.found) {
+      document.getElementById('sr-title').textContent = '✅ Tìm thấy hóa đơn';
+      body.innerHTML = `
+        <div style="display:grid;gap:10px">
+          <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px">
+            <span style="color:var(--muted)">Username</span>
+            <span style="font-weight:600;font-family:'DM Mono',monospace">${esc(d.username||username||'—')}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px">
+            <span style="color:var(--muted)">Mã CK</span>
+            <span style="font-weight:600;font-family:'DM Mono',monospace;font-size:12px">${esc(d.ck||ck||'—')}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px">
+            <span style="color:var(--muted)">Trạng thái</span>
+            <span style="color:var(--green);font-weight:700">${esc(d.status||'—')}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px 0;font-size:13px">
+            <span style="color:var(--muted)">Ghi chú</span>
+            <span style="font-weight:500">${esc(d.note||'—')}</span>
+          </div>
+        </div>`;
+    } else {
+      document.getElementById('sr-title').textContent = '❌ Không tìm thấy';
+      body.innerHTML = `<div style="color:var(--muted2);font-size:13px">Không có hóa đơn nào khớp với thông tin tra cứu.${d.error?'<br><span style="color:var(--red)">'+esc(d.error)+'</span>':''}</div>`;
+    }
+  } catch(e) {
+    body.innerHTML = `<div style="color:var(--red)">❌ Lỗi: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Status ────────────────────────────────────────────────────────────────
+const localStatuses = JSON.parse(localStorage.getItem('admin_statuses') || '[]');
+
+function renderStatuses(){
+  const el = document.getElementById('statusTagList');
+  if (!localStatuses.length) {
+    el.innerHTML = '<div class="empty" style="width:100%;padding:20px 0"><div class="empty-text">Chưa có trạng thái nào</div></div>';
+    return;
+  }
+  el.innerHTML = localStatuses.map((s,i) => `
+    <div class="status-tag">
+      <span>${esc(s.emoji||'📋')}</span>
+      <span style="color:var(--muted2)">${esc(s.kw)}</span>
+      <span style="color:var(--muted)">→</span>
+      <span>${esc(s.full)}</span>
+      <span class="del" onclick="removeStatus(${i})">✕</span>
+    </div>`).join('');
+}
+
+async function addStatus(){
+  const kw    = document.getElementById('st-kw').value.trim();
+  const full  = document.getElementById('st-full').value.trim();
+  const emoji = document.getElementById('st-emoji').value.trim() || '📋';
+  if (!kw || !full) { toast('⚠️ Nhập đủ từ khóa và nội dung','orange'); return; }
+  try {
+    await api('/admin/status/add', { method:'POST', body: JSON.stringify({ kw, full, emoji }) });
+    localStatuses.push({ kw, full, emoji });
+    localStorage.setItem('admin_statuses', JSON.stringify(localStatuses));
+    renderStatuses();
+    document.getElementById('st-kw').value = '';
+    document.getElementById('st-full').value = '';
+    document.getElementById('st-emoji').value = '';
+    toast('✅ Đã thêm trạng thái', 'green');
+  } catch(e) { toast('❌ '+e.message, 'red'); }
+}
+
+function removeStatus(i){
+  localStatuses.splice(i, 1);
+  localStorage.setItem('admin_statuses', JSON.stringify(localStatuses));
+  renderStatuses();
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────
+async function doWarmup(){
+  const btn = document.getElementById('warmupBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Đang warmup...';
+  document.getElementById('warmupResult').textContent = '';
+  try {
+    const d = await api('/admin/cache/warmup', { method:'POST' });
+    document.getElementById('warmupResult').textContent = '✅ ' + (d.message || 'Warmup đã bắt đầu');
+    toast('✅ Cache warmup khởi động', 'green');
+  } catch(e) {
+    document.getElementById('warmupResult').textContent = '❌ ' + e.message;
+    toast('❌ '+e.message, 'red');
+  }
+  btn.disabled = false; btn.innerHTML = '🔄 Chạy Warmup';
+}
+
+async function viewRawStats(){
+  const el = document.getElementById('rawStatsOutput');
+  el.style.display = 'block';
+  el.textContent = 'Đang tải...';
+  try {
+    const d = await api('/admin/stats');
+    el.textContent = JSON.stringify(d, null, 2);
+  } catch(e) { el.textContent = 'Lỗi: ' + e.message; }
+}
+
+async function inspectCache(){
+  const el = document.getElementById('inspectOutput');
+  el.style.display = 'block';
+  el.textContent = 'Đang tải...';
+  try {
+    const d = await api('/admin/cache/inspect');
+    el.textContent = JSON.stringify(d, null, 2);
+  } catch(e) { el.textContent = 'Lỗi: ' + e.message; }
+}
+
+async function pingHealth(){
+  const el = document.getElementById('pingResult');
+  el.textContent = '⏳ Đang ping...';
+  const t0 = Date.now();
+  try {
+    const baseUrl = CFG.url.replace(/\/$/, '');
+    const res = await fetch(baseUrl + '/health');
+    const d = await res.json();
+    const ms = Date.now() - t0;
+    el.innerHTML = `<span style="color:var(--green)">✅ Online</span> · ${ms}ms · ${esc(JSON.stringify(d))}`;
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--red)">❌ Offline</span> · ${e.message}`;
+  }
+}
+
+// ── Config ────────────────────────────────────────────────────────────────
+function openConfig(){
+  document.getElementById('cfg-url').value = CFG.url || '';
+  document.getElementById('cfg-key').value = CFG.key || '';
+  document.getElementById('configModal').style.display = 'flex';
+}
+function closeConfig(){ document.getElementById('configModal').style.display = 'none'; }
+function closeConfigOutside(e){ if (e.target === document.getElementById('configModal')) closeConfig(); }
+
+function saveConfig(){
+  CFG.url = document.getElementById('cfg-url').value.trim().replace(/\/$/,'');
+  CFG.key = document.getElementById('cfg-key').value.trim();
+  if (!CFG.url || !CFG.key) { toast('⚠️ Nhập đủ URL và Key','orange'); return; }
+  localStorage.setItem('admin_cfg', JSON.stringify(CFG));
+  closeConfig();
+  toast('✅ Đã lưu cấu hình','green');
+  clearInterval(autoRefT);
+  refreshAll();
+  renderStatuses();
+  autoRefT = setInterval(refreshAll, 30000);
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+function toast(msg, type){
+  const el = document.getElementById('toast');
+  const c = { green:'rgba(16,185,129,.4)', red:'rgba(239,68,68,.4)', orange:'rgba(245,158,11,.4)' };
+  el.innerHTML = msg; el.style.display = 'flex'; el.style.borderColor = c[type]||'rgba(255,255,255,.1)';
+  clearTimeout(toastT); toastT = setTimeout(()=>el.style.display='none', 3000);
+}
+
+function esc(s){ return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// Init status render
+renderStatuses();
+</script>
+</body>
+</html>

@@ -2,23 +2,13 @@
 
 // Mapping prefix mã đơn → Group ID Telegram của kênh T3
 const PAYMENT_CHANNEL_MAP = {
-  "N33PAY":   "-1003954942976",
-  "AOPAY":    "-4566163238",
-  "AQPAY":    "-5233602433",
-  "DZPAYVN":  "-4826708945",
-  "V9966":    "-1003957282333",   // FASTPAY
+  "N33PAY":   "-1003895406131",
   "GDPVN":    "-1003694816539",   // GDPAYVN
-  "HAPPYU":   "-4777611226",
-  "HGPAY":    "-4858475909",
-  "HIPAY":    "-1001815148750",   // HI PAY
-  "HKPVN":    "-5117615450",     // HKPAY
-  "NAPAY":    "-1002248691291",   // N1 PAY
-  "RMPAY":    "-1003770890341",   // RM PAY
-  "SGPAY":    "-5247614268",
   "SPPAY":    "-1003716238196",
-  "THUYPAY": "-1003960030669",   // THUYPHATPAY
-  "V8PAY":    "-1002392090513",
+  "THUYPAY": "-1003828299681",   // THUYPHATPAY
   "YOUPAYS":  "-1003761701169",
+  "THUPAY":  "-1003960030669",
+  "N3PAY":  "-1003954942976"
 };
 
 // Tập hợp tất cả Group ID của T3 (để nhận dạng tin nhắn từ nhóm T3)

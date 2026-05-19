@@ -195,7 +195,7 @@ function buildT3Keyboard() {
     inline_keyboard: [
       [{ text: "✅ Đã lên điểm | 已上分",    callback_data: "t3:status:Đã lên điểm" }],
       [{ text: "❌ Chưa nhận được | 尚未收到", callback_data: "t3:status:Chưa nhận được" }],
-      [{ text: "⚠️ Lệnh không khớp số tiền | 訂單金額不符",    callback_data: "t3:status:Lệnh không khớp số tiền" }],
+      [{ text: "⚠️ Lệnh sai số tiền | 訂單金額不符",    callback_data: "t3:status:Lệnh sai số tiền" }],
       [{ text: "🔄 Sai ngân hàng/người nhận | 銀行／收款人錯誤",  callback_data: "t3:status:Sai ngân hàng/người nhận" }],
       [{ text: "✏️ Khác | 其他",   callback_data: "t3:status:Khác" }],
     ],
@@ -517,7 +517,7 @@ async function handleCskhCallback(cb) {
 const DEFAULT_NOTES = {
   "Đã lên điểm":    "Thanh toán đã cập nhật vào tài khoản, quý khách vui lòng kiểm tra số dư. Xin cảm ơn",
   "Chưa nhận được": "Thanh toán chưa nhận được, tiếp tục đối soát và kiểm tra đến khi có thông báo mới",
-  "Lệnh không khớp số tiền":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
+  "Lệnh sai số tiền":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
   "Sai ngân hàng/người nhận":  "Ngân hàng/người nhận trên hóa đơn không thuộc ST666, khách hàng cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
 };
 

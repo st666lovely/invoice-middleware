@@ -273,7 +273,7 @@ async function fetchPendingRemark(username) {
       const depositTime = getTime(latest);
       const minutesAgo = Math.floor((Date.now() - depositTime) / 60000);
 
-      if (minutesAgo < 1440) {
+      if (minutesAgo < 5) {
         logger.info("ST666 deposit already credited", {
           username,
           depositId: latest?.depositid || null,

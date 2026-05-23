@@ -64,7 +64,7 @@ async function login() {
     },
     {
       headers: buildHeaders(null),
-      timeout: 12000,
+      timeout: 3000,
     }
   );
 
@@ -321,4 +321,86 @@ async function fetchPendingRemark(username) {
   }
 }
 
-module.exports = { fetchPendingRemark };
+
+// ── Deposit lookup cache (5 phút TTL) ─────────────────────────────────────────
+// Key: username (lowercase) → { result, expiry }
+// Tránh gọi BO nhiều lần cho cùng 1 username trong 5 phút
+const _depositCache = new Map();
+const DEPOSIT_CACHE_TTL = 5 * 60 * 1000; // 5 phút
+
+/**
+ * lookupDeposit(username)
+ * Tra cứu trạng thái deposit từ BO, có cache 5 phút.
+ * Trả về:
+ *   - { status: 'credited', depositAmt, depositTime, note }
+ *   - { status: 'pending',  remark }
+ *   - { status: 'notfound' }
+ */
+async function lookupDeposit(username) {
+  if (!username) return { status: 'notfound' };
+
+  const key = username.toLowerCase().trim();
+  const cached = _depositCache.get(key);
+  if (cached && Date.now() < cached.expiry) {
+    logger.info("ST666 deposit cache hit", { username, status: cached.result.status });
+    return cached.result;
+  }
+
+  let result;
+  try {
+    // BƯỚC 1: DEPOSIT_RECORD — đã lên điểm trong 30p
+    const credited = await searchDepositsByStatus(username, "DEPOSIT_RECORD", 1);
+    if (credited.length > 0) {
+      const latest      = pickLatestDeposit(credited);
+      const depositTime = getTime(latest);
+      const minutesAgo  = Math.floor((Date.now() - depositTime) / 60000);
+
+      if (minutesAgo < 30) {
+        result = {
+          status:      'credited',
+          depositAmt:  latest?.depositamt || latest?.inputdepositamt || 0,
+          depositTime,
+          minutesAgo,
+          note: `Đã ghi nhận lúc ${new Date(depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}`,
+        };
+        logger.info("ST666 lookup: credited", { username, minutesAgo });
+        _depositCache.set(key, { result, expiry: Date.now() + DEPOSIT_CACHE_TTL });
+        return result;
+      }
+    }
+
+    // BƯỚC 2: DEPOSIT_AUDIT — đang chờ duyệt
+    let auditList = await searchDepositsByStatus(username, "DEPOSIT_AUDIT", 1);
+    if (!auditList.length) auditList = await searchDepositsByStatus(username, "DEPOSIT_AUDIT", 7);
+
+    if (auditList.length > 0) {
+      const latest = pickLatestDeposit(auditList);
+      const remark = extractDepositRemark(latest);
+      result = {
+        status: 'pending',
+        remark: remark || null,
+        depositAmt:  latest?.depositamt || latest?.inputdepositamt || 0,
+        depositTime: getTime(latest),
+      };
+      logger.info("ST666 lookup: pending", { username, remark });
+      _depositCache.set(key, { result, expiry: Date.now() + DEPOSIT_CACHE_TTL });
+      return result;
+    }
+
+    result = { status: 'notfound' };
+    // Cache notfound ngắn hơn (1 phút) — phòng trường hợp mới nạp
+    _depositCache.set(key, { result, expiry: Date.now() + 60000 });
+    return result;
+
+  } catch (err) {
+    logger.error("ST666 lookupDeposit error", { username, error: err.message });
+    return { status: 'notfound' };
+  }
+}
+
+/** Xóa cache cho 1 user (dùng khi cần force refresh) */
+function invalidateDepositCache(username) {
+  if (username) _depositCache.delete(username.toLowerCase().trim());
+}
+
+module.exports = { fetchPendingRemark, lookupDeposit, invalidateDepositCache };

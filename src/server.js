@@ -10,6 +10,7 @@ const rateLimit = require("express-rate-limit");
 const multer   = require("multer");
 const { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice } = require("./telegram");
 const { fetchDepositRemarkByUsername } = require("./boBrowser");
+const { lookupDeposit, invalidateDepositCache } = require("./st666api");
 const logger = require("./logger");
 
 // ── Multer ────────────────────────────────────────────────────────────────────
@@ -119,6 +120,7 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
   }
 
   try {
+    // ── BƯỚC 1: Tìm trong Telegram cache (imageCache + textCache) ────────────
     const result = await searchInvoiceByAll({
       username:        username        || null,
       fullname:        null,
@@ -135,6 +137,37 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
         ck:       transferContent || null,
       });
     }
+
+    // ── BƯỚC 2+3: Không có trong cache → tra BO (DEPOSIT_RECORD + DEPOSIT_AUDIT) ──
+    // lookupDeposit có cache 5 phút, không gọi BO nhiều lần cho cùng user
+    if (username) {
+      const bo = await lookupDeposit(username);
+
+      if (bo.status === 'credited') {
+        const time = new Date(bo.depositTime)
+          .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+        const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
+        return res.json({
+          found:    true,
+          status:   "Đã lên điểm",
+          note:     `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
+          username,
+          ck:       transferContent || null,
+        });
+      }
+
+      if (bo.status === 'pending') {
+        return res.json({
+          found:    true,
+          status:   "Đang xử lý",
+          note:     "Hóa đơn đang chờ được duyệt",
+          username,
+          ck:       transferContent || null,
+        });
+      }
+    }
+
+    // ── BƯỚC 4: Không tìm thấy ở đâu → cho hối thúc ─────────────────────────
     return res.json({ found: false });
 
   } catch (err) {
@@ -245,6 +278,8 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
       fileId:    sentMsg.photo?.length ? sentMsg.photo[sentMsg.photo.length - 1].file_id : null,
     });
 
+    // Xóa deposit cache để lần check tiếp theo lấy data mới nhất
+    invalidateDepositCache(username);
     return res.json({ ok: true, telegram: tg.data?.ok === true });
 
   } catch (err) {

@@ -196,7 +196,7 @@ tbody tr:hover td{background:#fafafa}
             </div>
           </div>
           <div class="chart-card">
-            <div class="chart-title">Đơn theo giờ <span class="chart-sub">Hôm nay (giờ VN)</span></div>
+            <div class="chart-title">Đơn theo giờ <span class="chart-sub">14 ngày gần nhất</span></div>
             <div class="bar-chart" id="bar-chart"></div>
           </div>
         </div>
@@ -268,8 +268,8 @@ async function api(p){return(await fetch(BASE+p,{headers:{'x-admin-key':API_KEY}
 async function loadAll(){
   var ico=document.getElementById('spin-ico');ico.className='spinning';
   try{
-    var[cache,logs]=await Promise.all([api('/admin/cache/inspect'),api('/admin/logs?limit=50')]);
-    renderCards(cache);renderDonut(cache);renderBars(cache);renderMini(cache);renderFull(cache);renderLogs(logs);
+    var[stats,logs]=await Promise.all([api('/admin/invoice-stats'),api('/admin/logs?limit=50')]);
+    renderCards(stats);renderDonut(stats);renderBars(stats);renderMini(stats);renderFull(stats);renderLogs(logs);
   }catch(e){console.error(e);}
   ico.className='';cdn=30;
 }
@@ -286,11 +286,10 @@ function showPage(id,el){
 var ICONS=['📦','✅','⏳','❌','⚠️','🏦'];
 var IBGS=['#fef3c7','#dcfce7','#f0f0f8','#fee2e2','#ede9fe','#dbeafe'];
 function renderCards(c){
-  var im=mergeStatus(c),sc={};
-  im.forEach(function(e){var s=e.status||'-';sc[s]=(sc[s]||0)+1;});
-  var all=im;
+  var sc=c.byStatus||{};
+  var im=c.invoices||[];
   var cards=[
-    {l:'Tổng đơn',v:im.length,s:'image cache'},
+    {l:'Tổng đơn',v:c.total||0,s:'đơn thực tế'},
     {l:'Đã lên điểm',v:sc['Đã lên điểm']||0,s:'xử lý thành công'},
     {l:'Chờ xử lý',v:sc['-']||0,s:'chưa có trạng thái'},
     {l:'Chưa nhận được',v:sc['Chưa nhận được']||0,s:'cần tra soát'},
@@ -306,9 +305,8 @@ function renderCards(c){
 
 var SC={'Đã lên điểm':'#16a34a','Chưa nhận được':'#dc2626','Lệnh sai số tiền':'#7c3aed','Sai ngân hàng/người nhận':'#2563eb','Khác':'#d97706','-':'#e0e0ec'};
 function renderDonut(c){
-  var im=mergeStatus(c),sc={},total=im.length||1;
-  im.forEach(function(e){var s=e.status||'-';sc[s]=(sc[s]||0)+1;});
-  document.getElementById('donut-total').textContent=im.length+' tổng';
+  var sc=c.byStatus||{},total=c.total||1;
+  document.getElementById('donut-total').textContent=(c.total||0)+' tổng';
   var entries=Object.entries(sc).sort(function(a,b){return b[1]-a[1]});
   var r=50,cx=65,cy=65,sw=18,circ=2*Math.PI*r,off=0;
   var paths=entries.map(function(e){
@@ -318,7 +316,7 @@ function renderDonut(c){
   }).join('');
   document.getElementById('donut-svg').innerHTML=
     '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#f0f0f8" stroke-width="'+sw+'"/>'+paths+
-    '<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="Plus Jakarta Sans" font-weight="700" font-size="22" fill="#1a1a2e">'+all.length+'</text>'+
+    '<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="Plus Jakarta Sans" font-weight="700" font-size="22" fill="#1a1a2e">'+(c.total||0)+'</text>'+
     '<text x="'+cx+'" y="'+(cy+12)+'" text-anchor="middle" font-family="Plus Jakarta Sans" font-size="11" fill="#a0a0b5">đơn</text>';
   document.getElementById('dlegend').innerHTML=entries.slice(0,5).map(function(e){
     var col=SC[e[0]]||'#ccc',pct=Math.round(e[1]/total*100),name=e[0]==='-'?'Chưa xử lý':e[0];
@@ -329,24 +327,25 @@ function renderDonut(c){
 }
 
 function renderBars(c){
-  var im=c?.images||[],hrs={};
-  for(var h=0;h<24;h++)hrs[h]=0;
-  var today=new Date(Date.now()+7*3600000).toISOString().slice(0,10);
-  im.forEach(function(e){
-    if(!e.cached_at)return;
-    var d=new Date(e.cached_at),ds=new Date(d.getTime()+7*3600000).toISOString().slice(0,10);
-    if(ds===today){var hh=new Date(d.getTime()+7*3600000).getUTCHours();hrs[hh]=(hrs[hh]||0)+1;}
-  });
-  var mx=Math.max(...Object.values(hrs),1);
-  document.getElementById('bar-chart').innerHTML=Object.entries(hrs).map(function(e){
-    var h=e[0],v=e[1],pct=Math.max(v/mx*100,v>0?6:2).toFixed(0);
-    return '<div class="bar-item"><div class="bar-fill" style="height:'+pct+'%;background:'+(v>0?'var(--gold)':'#f0f0f6')+'" data-tip="'+v+' đơn &middot; '+h+'h"></div>'+
-      '<div class="bar-lbl">'+(h%4===0?(h<10?'0':'')+h:'')+'</div></div>';
+  // Dùng byDate để vẽ bar chart 14 ngày gần nhất
+  var byDate=c.byDate||{};
+  var dates=[];
+  for(var i=13;i>=0;i--){
+    var d=new Date(Date.now()+7*3600000-i*86400000);
+    dates.push(d.toISOString().slice(0,10));
+  }
+  var vals=dates.map(function(d){return byDate[d]||0;});
+  var mx=Math.max(...vals,1);
+  document.getElementById('bar-chart').innerHTML=vals.map(function(v,i){
+    var pct=Math.max(v/mx*100,v>0?6:2).toFixed(0);
+    var lbl=dates[i].slice(5); // MM-DD
+    return '<div class="bar-item"><div class="bar-fill" style="height:'+pct+'%;background:'+(v>0?'var(--gold)':'#f0f0f6')+'" data-tip="'+v+' đơn &middot; '+lbl+'"></div>'+
+      '<div class="bar-lbl">'+(i%4===0?lbl:'')+'</div></div>';
   }).join('');
 }
 
 function renderMini(c){
-  var rows=mergeStatus(c).slice().sort(function(a,b){return new Date(b.cached_at||0)-new Date(a.cached_at||0)}).slice(0,8);
+  var rows=(c.invoices||[]).slice(0,8);
   document.getElementById('mini-tbl').innerHTML=rows.length?rows.map(function(r){
     return '<tr><td class="td-main">'+(r.username||'-')+'</td><td class="td-mono">'+(r.ck_code||'-')+'</td>'+
       '<td>'+sbadge(r.status)+'</td><td class="td-mono" style="color:var(--muted)">'+ft(r.cached_at)+'</td></tr>';
@@ -370,7 +369,7 @@ function mergeStatus(c){
 }
 
 function renderFull(c){
-  allRows=mergeStatus(c).slice().sort(function(a,b){return new Date(b.cached_at||0)-new Date(a.cached_at||0)});
+  allRows=c.invoices||[];
   filterTable();
 }
 

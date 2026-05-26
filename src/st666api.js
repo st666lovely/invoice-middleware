@@ -17,8 +17,8 @@ const crypto = require("crypto");
 const logger = require("./logger");
 
 const BASE    = process.env.ST666_API_BASE || "https://boapi.bo666st.com/vh7prod-ims/api/v1";
-const BO_USER = process.env.ST666_BO_USER;
-const BO_PASS = process.env.ST666_BO_PASS;
+const BO_USER = process.env.BO_USERNAME;
+const BO_PASS = process.env.BO_PASSWORD;
 
 function sha1(str) {
   return crypto.createHash("sha1").update(str).digest("hex");

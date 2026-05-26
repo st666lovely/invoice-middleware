@@ -81,6 +81,15 @@ app.get("/health", (_req, res) => res.json({
   timestamp: new Date().toISOString(),
 }));
 
+app.get("/my-ip", async (_req, res) => {
+  try {
+    const r = await axios.get("https://api.ipify.org?format=json", { timeout: 5000 });
+    res.json(r.data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Webhook Telegram ──────────────────────────────────────────────────────────
 app.post("/webhook/telegram", async (req, res) => {
   try { await telegramService.processUpdate(req.body); } catch (e) { logger.error("TG error", { error: e.message }); }

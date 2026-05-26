@@ -1,0 +1,380 @@
+"use strict";
+require("dotenv").config();
+const express  = require("express");
+const axios    = require("axios");
+const path     = require("path");
+const FormData = require("form-data");
+const cors     = require("cors");
+const helmet   = require("helmet");
+const rateLimit = require("express-rate-limit");
+const multer   = require("multer");
+const { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice } = require("./telegram");
+const { fetchDepositRemarkByUsername } = require("./boBrowser");
+const { lookupDeposit, invalidateDepositCache } = require("./st666api");
+const logger = require("./logger");
+
+// ── Multer ────────────────────────────────────────────────────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    file.mimetype.startsWith("image/") ? cb(null, true) : cb(new Error("Chỉ chấp nhận file ảnh"), false);
+  },
+});
+
+// ── App ───────────────────────────────────────────────────────────────────────
+const app  = express();
+const PORT = process.env.PORT || 3000;
+
+app.set("trust proxy", 1);
+app.use(helmet({contentSecurityPolicy: false,}));;
+app.use(cors({ origin: "*" }));
+app.use(express.static(path.join(__dirname, "public")));  // ← thêm vào đây
+app.use(express.json({ limit: "20kb" }));
+app.use("/webhook", rateLimit({ windowMs: 60000, max: 200, standardHeaders: true, legacyHeaders: false }));
+// ── Logs ──────────────────────────────────────────────────────────────────────
+const recentLogs = [];
+const _origInfo  = logger.info.bind(logger);
+const _origError = logger.error.bind(logger);
+const _origWarn  = logger.warn.bind(logger);
+function pushLog(level, msg, meta) {
+  recentLogs.push({ ts: new Date().toISOString(), level, msg, meta: meta || {} });
+  if (recentLogs.length > 100) recentLogs.shift();
+}
+logger.info  = (m, d) => { pushLog("info",  m, d); _origInfo(m,  d); };
+logger.error = (m, d) => { pushLog("error", m, d); _origError(m, d); };
+logger.warn  = (m, d) => { pushLog("warn",  m, d); _origWarn(m,  d); };
+
+// ── Duplicate transferContent registry (in-memory) ───────────────────────────
+const ckRegistry = new Map(); // ck_lower -> { username, time }
+
+function ckRegister(ck, username) {
+  if (ckRegistry.size > 10000) {
+    // Xoá entry cũ nhất khi đầy
+    ckRegistry.delete(ckRegistry.keys().next().value);
+  }
+  const key = ck.toLowerCase().trim();
+  if (!ckRegistry.has(key)) {
+    ckRegistry.set(key, { username: (username || "").toLowerCase().trim(), time: new Date() });
+  }
+}
+
+function ckCheckDuplicate(ck, username) {
+  const key = ck.toLowerCase().trim();
+  const existing = ckRegistry.get(key);
+  if (!existing) return false;
+  // Cùng username → không phải duplicate (tra lại)
+  if (existing.username === (username || "").toLowerCase().trim()) return false;
+  return true;
+}
+
+// ── Urgent dedup — chặn gửi TG trùng lặp ────────────────────────────────────
+const urgentSentSet = new Set();
+
+function urgentNorm(ck) {
+  return (ck || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+// ── Routes cơ bản ─────────────────────────────────────────────────────────────
+app.get("/health", (_req, res) => res.json({
+  status: "ok",
+  timestamp: new Date().toISOString(),
+}));
+
+app.get("/my-ip", async (_req, res) => {
+  try {
+    const r = await axios.get("https://api.ipify.org?format=json", { timeout: 5000 });
+    res.json(r.data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Webhook Telegram ──────────────────────────────────────────────────────────
+app.post("/webhook/telegram", async (req, res) => {
+  try { await telegramService.processUpdate(req.body); } catch (e) { logger.error("TG error", { error: e.message }); }
+  res.json({ ok: true });
+});
+
+// ── Public API — Web tool tra cứu ─────────────────────────────────────────────
+const checkInvoiceLimit = rateLimit({
+  windowMs: 60 * 1000, max: 20,
+  message: { found: false, error: "Quá nhiều yêu cầu, vui lòng chờ 1 phút" },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+app.get("/api/check-invoice", (_req, res) => {
+  const stats = telegramService.getCacheStats();
+  res.json({ ok: true, cache: stats, message: "POST để tra cứu hóa đơn" });
+});
+
+app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async (req, res) => {
+  const { username, transferContent } = req.body || {};
+  const imageBuffer = req.file?.buffer || null;
+
+  if (!username && !transferContent && !imageBuffer) {
+    return res.status(400).json({ found: false, error: "Thiếu thông tin tra cứu" });
+  }
+
+  logger.info("Web check-invoice", { username: username || "-", ck: transferContent || "-", hasImage: !!imageBuffer });
+
+  // ── Duplicate transferContent check ────────────────────────────────────────
+  if (transferContent && transferContent.trim().length >= 4) {
+    if (ckCheckDuplicate(transferContent, username)) {
+      logger.warn("Duplicate CK detected", { ck: transferContent, by: username });
+      return res.json({ found: false, duplicate: true });
+    }
+    // Ghi nhận lần đầu dùng CK này
+    ckRegister(transferContent, username);
+  }
+
+  try {
+    // ── Bước 1: Tìm trong Telegram cache ─────────────────────────────────────
+    const result = await searchInvoiceByAll({
+      username:        username        || null,
+      fullname:        null,
+      transferContent: transferContent || null,
+      imageBuffer,
+    });
+
+    if (result?.found) {
+      return res.json({
+        found:    true,
+        status:   result.status || "Đang xử lý",
+        note:     result.note   || null,
+        username: username      || null,
+        ck:       transferContent || null,
+      });
+    }
+
+    // ── Bước 2+3: Không có trong cache → tra BO (DEPOSIT_RECORD + DEPOSIT_AUDIT) ──
+    if (username) {
+      const bo = await lookupDeposit(username);
+
+      if (bo.status === 'credited') {
+        const time = new Date(bo.depositTime)
+          .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+        const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
+        return res.json({
+          found:    true,
+          status:   "Đã lên điểm",
+          note:     `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
+          username,
+          ck:       transferContent || null,
+        });
+      }
+
+      if (bo.status === 'pending') {
+        return res.json({
+          found:    true,
+          status:   "Đang xử lý",
+          note:     "Hóa đơn đang chờ được duyệt",
+          username,
+          ck:       transferContent || null,
+        });
+      }
+    }
+
+    // ── Bước 4: Không tìm thấy ở đâu ────────────────────────────────────────
+    return res.json({ found: false });
+
+  } catch (err) {
+    logger.error("Web check-invoice error", { error: err.message });
+    return res.json({ found: false, error: "Lỗi hệ thống, vui lòng thử lại" });
+  }
+});
+
+// ── Public API — Hối thúc hóa đơn qua Telegram ────────────────────────────────
+app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
+  try {
+    const token  = process.env.URGENT_TG_BOT_TOKEN;
+    const chatId = process.env.URGENT_TG_GROUP_ID;
+
+    if (!token || !chatId) {
+      logger.error("Urgent invoice config missing", { hasToken: !!token, hasChatId: !!chatId });
+      return res.status(500).json({ ok: false, error: "Thiếu cấu hình Telegram urgent bot" });
+    }
+
+    const username        = (req.body.username || "-").trim();
+    const fullname        = (req.body.fullname || "-").trim();
+    const transferContent = (req.body.transferContent || req.body.ck || "-").trim();
+    const image           = req.file;
+
+    if (!username || username === "-" || !transferContent || transferContent === "-") {
+      return res.status(400).json({ ok: false, error: "Thiếu tài khoản hoặc mã giao dịch" });
+    }
+
+    // ── Chặn gửi TG duplicate ─────────────────────────────────────────────────
+    const ckKey = urgentNorm(transferContent);
+    if (ckKey && urgentSentSet.has(ckKey)) {
+      logger.info("Urgent duplicate suppressed", { username, ck: transferContent });
+      return res.json({ ok: true });
+    }
+    // KHÔNG add vào Set ở đây — chỉ add sau khi gửi TG thành công
+
+    // ── Tra Deposit Remark bằng Playwright BO browser ────────────────────────────
+    let orderCode = "-";
+    try {
+      const depositRemark = await fetchDepositRemarkByUsername(username, transferContent);
+
+      // Đơn đã lên điểm → trả về thẳng cho frontend, không escalate
+      if (depositRemark && typeof depositRemark === "object" && depositRemark.alreadyCredited) {
+        const time = new Date(depositRemark.depositTime)
+          .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+        const amt  = Number(depositRemark.depositAmt).toLocaleString("vi-VN");
+        logger.info("Deposit already credited, skip escalate", { username, amt, time });
+        return res.json({
+          ok:              true,
+          alreadyCredited: true,
+          message:         `✅ Đơn nạp ${amt} của bạn đã được ghi nhận lúc ${time}. Vui lòng kiểm tra số dư tài khoản.`,
+        });
+      }
+
+      if (depositRemark) {
+        orderCode = depositRemark;
+        logger.info("BO browser deposit remark fetched", { username, orderCode });
+      } else {
+        logger.warn("BO browser deposit remark not found", { username });
+      }
+    } catch (e) {
+      logger.warn("BO browser fetch skipped", { error: e.message, username });
+    }
+
+    const caption = [
+      username,
+      fullname,
+      transferContent,
+      orderCode,
+      "Yêu cầu hối thúc hóa đơn từ khách",
+      "-",
+    ].join("\n");
+
+    let tg;
+    const cskhReplyMarkup = telegramService.buildCskhKeyboard();
+
+    if (image && image.buffer) {
+      const form = new FormData();
+      form.append("chat_id", chatId);
+      form.append("caption", caption);
+      form.append("reply_markup", JSON.stringify(cskhReplyMarkup));
+      form.append("photo", image.buffer, {
+        filename:    image.originalname || "invoice.jpg",
+        contentType: image.mimetype     || "image/jpeg",
+      });
+      tg = await axios.post(
+        `https://api.telegram.org/bot${token}/sendPhoto`,
+        form,
+        { headers: form.getHeaders(), timeout: 35000 }
+      );
+    } else {
+      tg = await axios.post(
+        `https://api.telegram.org/bot${token}/sendMessage`,
+        { chat_id: chatId, text: caption, reply_markup: cskhReplyMarkup },
+        { timeout: 25000 }
+      );
+    }
+
+    const sentMsg = tg.data?.result || {};
+    addManualInvoice({
+      messageId: sentMsg.message_id,
+      username,
+      fullname,
+      ckCode:    transferContent,
+      orderCode,
+      status:    "-",
+      note:      "Yêu cầu hối thúc hóa đơn từ khách",
+      fileId:    sentMsg.photo?.length ? sentMsg.photo[sentMsg.photo.length - 1].file_id : null,
+    });
+
+    // Chỉ đánh dấu duplicate sau khi gửi TG thành công
+    if (ckKey) urgentSentSet.add(ckKey);
+    // Xóa deposit cache để lần check tiếp theo lấy data mới từ BO
+    if (username) invalidateDepositCache(username);
+    return res.json({ ok: true, telegram: tg.data?.ok === true });
+
+  } catch (err) {
+    logger.error("Urgent invoice send failed", {
+      error: err.message,
+      tg:    err.response?.data || null,
+    });
+    return res.status(500).json({
+      ok:     false,
+      error:  "Gửi hối thúc thất bại",
+      detail: err.response?.data?.description || err.message,
+    });
+  }
+});
+
+// ── Admin API ─────────────────────────────────────────────────────────────────
+const ADMIN_KEY = process.env.ADMIN_API_KEY || "";
+
+function adminAuth(req, res, next) {
+  const key = req.headers["x-admin-key"] || req.query.key;
+  if (!ADMIN_KEY) return res.status(503).json({ error: "ADMIN_API_KEY chưa được cấu hình" });
+  if (key !== ADMIN_KEY) return res.status(401).json({ error: "Unauthorized" });
+  next();
+}
+
+app.get("/admin/stats", adminAuth, (_req, res) => {
+  res.json({
+    ok:        true,
+    cache:     telegramService.getCacheStats(),
+    uptime:    Math.floor(process.uptime()),
+    memory:    Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/admin/logs", adminAuth, (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  res.json({ ok: true, logs: recentLogs.slice(-limit) });
+});
+
+app.get("/admin/cache", adminAuth, (_req, res) => {
+  res.json({ ok: true, cache: telegramService.getCacheStats() });
+});
+
+app.get("/admin/cache/inspect", adminAuth, (_req, res) => {
+  const data = getDebugCache();
+  res.json({ ok: true, ...data });
+});
+
+app.get("/admin/invoice-stats", adminAuth, (_req, res) => {
+  res.json({ ok: true, ...getInvoiceStats() });
+});
+
+app.post("/admin/cache/warmup", adminAuth, async (req, res) => {
+  res.json({ ok: true, message: "Đang warmup cache..." });
+  try { await telegramService.warmupCache(process.env.PUBLIC_URL); }
+  catch (e) { logger.error("Manual warmup failed", { error: e.message }); }
+});
+
+app.post("/admin/status/add", adminAuth, (req, res) => {
+  const { kw, full, emoji } = req.body;
+  if (!kw || !full) return res.status(400).json({ error: "Thiếu kw hoặc full" });
+  addRuntimeStatus({ kw, full, emoji: emoji || "📋" });
+  res.json({ ok: true, message: "Đã thêm: " + kw });
+});
+
+// ── Error handler ─────────────────────────────────────────────────────────────
+app.use((err, _req, res, _next) => {
+  logger.error("Unhandled", { error: err.message });
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+app.listen(PORT, async () => {
+  logger.info(`Server running on port ${PORT}`);
+  const PUBLIC_URL = process.env.PUBLIC_URL;
+  if (PUBLIC_URL) {
+    setTimeout(() => {
+      telegramService.warmupCache(PUBLIC_URL)
+        .then(() => logger.info("Cache warmup complete"))
+        .catch(e => logger.error("Cache warmup failed", { error: e.message }));
+    }, 2000);
+  } else {
+    logger.warn("PUBLIC_URL not set, skipping cache warmup");
+  }
+});
+
+module.exports = app;

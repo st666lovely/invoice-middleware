@@ -283,8 +283,8 @@ function showPage(id,el){
   document.getElementById('page-title').textContent=PT[id]||id;
 }
 
-var ICONS=['📦','✅','✅','⏳','❌','⚠️','🏦'];
-var IBGS=['#fef3c7','#dcfce7','#d1fae5','#f0f0f8','#fee2e2','#ede9fe','#dbeafe'];
+var ICONS=['📦','✅','✅','⏳','❌','⚠️','🏦','🚫'];
+var IBGS=['#fef3c7','#dcfce7','#d1fae5','#f0f0f8','#fee2e2','#ede9fe','#dbeafe','#fff1f2'];
 function renderCards(c){
   var sc=c.byStatus||{};
   var im=c.invoices||[];
@@ -297,6 +297,7 @@ function renderCards(c){
     {l:'Chưa nhận được',v:sc['Chưa nhận được']||0,s:'cần tra soát'},
     {l:'Lệnh sai số tiền',v:sc['Lệnh sai số tiền']||0,s:'sai số tiền'},
     {l:'Sai ngân hàng',v:sc['Sai ngân hàng/người nhận']||0,s:'sai NH/người nhận'},
+    {l:'Lỗi thanh toán',v:sc['Lỗi thanh toán']||0,s:'lỗi thanh toán'},
   ];
   document.getElementById('stat-cards').innerHTML=cards.map(function(c,i){
     return '<div class="scard"><div class="scard-icon" style="background:'+IBGS[i]+'">'+ICONS[i]+'</div>'+

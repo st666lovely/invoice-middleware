@@ -174,7 +174,6 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
           ck:       transferContent || null,
         });
       }
-    }
 
       // Fallback: boBrowser (Playwright) nếu lookupDeposit không tìm được
       try {

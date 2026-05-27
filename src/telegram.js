@@ -703,41 +703,62 @@ function getInvoiceStats() {
       statusMap.set(e.parent_id, { status: e.status, note: e.note || null, ts });
     }
   }
-
-  // Chỉ lấy imageCache entries có username (= đơn thực của CSKH)
-  const invoices = [];
+ 
+  // Lấy tất cả entries có username + parent_id null (tin gốc)
+  const raw = [];
   for (const [id, e] of imageCache) {
     if (!e.username) continue;
+    if (e.parent_id != null) continue;
     const merged = statusMap.get(id);
-    invoices.push({
+    raw.push({
       msgId:     id,
       username:  e.username,
       ck_code:   e.ck_code   || null,
       fullname:  e.fullname  || null,
-      orderCode: e.orderCode || null,
       status:    merged?.status || e.status || '-',
       note:      merged?.note   || e.note   || null,
       cached_at: e.cached_at,
     });
   }
-
-  // Sắp xếp mới nhất trước
-  invoices.sort((a, b) => b.cached_at - a.cached_at);
-
+ 
+  // Deduplicate: cùng username + ck_code → chỉ giữ entry mới nhất
+  const dedupMap = new Map();
+  for (const inv of raw) {
+    const key = (inv.username || '').toLowerCase() + '|' + (inv.ck_code || '').toLowerCase();
+    const existing = dedupMap.get(key);
+    // Ưu tiên entry có status thực > '-', hoặc entry mới hơn
+    if (!existing) {
+      dedupMap.set(key, inv);
+    } else {
+      const curHasStatus  = inv.status && inv.status !== '-';
+      const prevHasStatus = existing.status && existing.status !== '-';
+      if (curHasStatus && !prevHasStatus) {
+        dedupMap.set(key, inv); // entry mới có status thực
+      } else if (curHasStatus && prevHasStatus) {
+        if (inv.cached_at > existing.cached_at) dedupMap.set(key, inv);
+      } else if (!prevHasStatus && inv.cached_at > existing.cached_at) {
+        dedupMap.set(key, inv);
+      }
+    }
+  }
+ 
+  const invoices = [...dedupMap.values()]
+    .sort((a, b) => b.cached_at - a.cached_at);
+ 
   // Đếm theo trạng thái
   const byStatus = {};
   for (const inv of invoices) {
     const s = inv.status || '-';
     byStatus[s] = (byStatus[s] || 0) + 1;
   }
-
+ 
   // Đếm theo ngày (giờ VN +07:00)
   const byDate = {};
   for (const inv of invoices) {
     const d = new Date(inv.cached_at + 7 * 3600000).toISOString().slice(0, 10);
     byDate[d] = (byDate[d] || 0) + 1;
   }
-
+ 
   return {
     total:    invoices.length,
     byStatus,
@@ -748,8 +769,8 @@ function getInvoiceStats() {
     })),
   };
 }
-
-// ── Debug ─────────────────────────────────────────────────────────────────────
+ 
+ 
 function getDebugCache() {
   const images = [...imageCache.entries()].map(([id, e]) => ({
     msgId:     id,
@@ -768,17 +789,17 @@ function getDebugCache() {
   }));
   return { images, texts, replyCount: replyIndex.size };
 }
-
+ 
 function addRuntimeStatus({ kw, full, emoji }) {
   STATUS_MAP.unshift({ kw: kw.toLowerCase(), full, emoji: emoji || "📋" });
   logger.info("Runtime status added", { kw, full });
 }
-
+ 
 // ── Exports ───────────────────────────────────────────────────────────────────
 const telegramService = {
   processUpdate, setupWebhook, warmupCache,
   getCacheStats: () => ({ images: imageCache.size, texts: textCache.size, replies: replyIndex.size, t3Links: t3Links.size }),
   buildCskhKeyboard,
 };
-
+ 
 module.exports = { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice };

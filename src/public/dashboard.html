@@ -283,14 +283,16 @@ function showPage(id,el){
   document.getElementById('page-title').textContent=PT[id]||id;
 }
 
-var ICONS=['📦','✅','⏳','❌','⚠️','🏦'];
-var IBGS=['#fef3c7','#dcfce7','#f0f0f8','#fee2e2','#ede9fe','#dbeafe'];
+var ICONS=['📦','✅','✅','⏳','❌','⚠️','🏦'];
+var IBGS=['#fef3c7','#dcfce7','#d1fae5','#f0f0f8','#fee2e2','#ede9fe','#dbeafe'];
 function renderCards(c){
   var sc=c.byStatus||{};
   var im=c.invoices||[];
+  var boTotal=(c.boCredits&&c.boCredits.total)||0;
   var cards=[
     {l:'Tổng đơn',v:c.total||0,s:'đơn thực tế'},
-    {l:'Đã lên điểm',v:sc['Đã lên điểm']||0,s:'xử lý thành công'},
+    {l:'Đã lên điểm (CS/T3)',v:sc['Đã lên điểm']||0,s:'CS hoặc T3 xác nhận'},
+    {l:'Đã lên điểm (Tự tra)',v:boTotal,s:'tự tra BO RECORD'},
     {l:'Chờ xử lý',v:sc['-']||0,s:'chưa có trạng thái'},
     {l:'Chưa nhận được',v:sc['Chưa nhận được']||0,s:'cần tra soát'},
     {l:'Lệnh sai số tiền',v:sc['Lệnh sai số tiền']||0,s:'sai số tiền'},

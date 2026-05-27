@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ST666 · Analytics Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f2f3f7;--white:#ffffff;--border:#e2e4ed;--border2:#c8cad8;
+  --text:#0f0f1a;--sub:#52526e;--muted:#9898b0;
+  --black:#0d0d0d;
+  --gold:#c9a84c;--gold-light:#fdf0d8;--gold-dark:#8a6520;
+  --green:#15803d;--green-light:#dcfce7;
+  --red:#b91c1c;--red-light:#fee2e2;
+  --blue:#1d4ed8;--blue-light:#dbeafe;
+  --purple:#6d28d9;--purple-light:#ede9fe;
+  --shadow:0 1px 4px rgba(0,0,0,.08),0 6px 20px rgba(0,0,0,.06);
+  --shadow-lg:0 6px 32px rgba(0,0,0,.12);
+  --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+#lock{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#fafafa,#f0f0f8)}
+.lock-wrap{width:420px;padding:0 20px}
+.lock-logo{font-family:'Cormorant Garamond',serif;font-size:38px;font-weight:700;color:var(--text);text-align:center;margin-bottom:4px}
+.lock-logo span{color:var(--gold)}
+.lock-tagline{text-align:center;font-size:13px;color:var(--muted);margin-bottom:40px}
+.lock-card{background:var(--white);border-radius:20px;padding:40px;box-shadow:0 8px 40px rgba(0,0,0,.08);border:1px solid var(--border)}
+.lock-card h2{font-size:18px;font-weight:700;margin-bottom:6px}
+.lock-card p{font-size:13px;color:var(--sub);margin-bottom:28px}
+.flabel{font-size:11px;font-weight:700;color:var(--sub);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px}
+.finp{width:100%;background:var(--bg);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;font-family:"JetBrains Mono",monospace;font-size:14px;color:var(--text);outline:none;transition:border-color .2s,box-shadow .2s;letter-spacing:2px;margin-bottom:16px}
+.finp:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(201,168,76,.12)}
+.btnlogin{width:100%;background:var(--text);color:#fff;border:none;border-radius:10px;padding:14px;font-family:"Plus Jakarta Sans",sans-serif;font-size:14px;font-weight:700;letter-spacing:.3px;cursor:pointer;transition:background .2s,transform .1s}
+.btnlogin:hover{background:#2d2d4a;transform:translateY(-1px)}
+.lockerr{font-size:12px;color:var(--red);text-align:center;margin-top:12px;min-height:18px}
+#app{display:none}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:240px;flex-shrink:0;background:var(--white);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;box-shadow:2px 0 12px rgba(0,0,0,.06)}
+.sb-logo{padding:18px 20px;border-bottom:1px solid rgba(255,255,255,.08);background:var(--black)}
+.sb-logo img{height:36px;width:auto;object-fit:contain}
+.sb-logo-sub{font-size:10px;color:rgba(255,255,255,.4);margin-top:6px;letter-spacing:.3px}
+.sb-nav{padding:12px;flex:1}
+.sb-sec{font-size:10px;font-weight:800;font-family:"Nunito",sans-serif;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase;padding:10px 12px 6px}
+.sb-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;font-size:14px;font-weight:500;color:var(--sub);cursor:pointer;transition:all .15s;margin-bottom:2px}
+.sb-item:hover{background:var(--bg);color:var(--text)}
+.sb-item.active{background:var(--gold-light);color:var(--gold-dark);font-weight:600}
+.sb-footer{padding:16px 20px;border-top:1px solid var(--border)}
+.sb-status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--sub)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0}
+.content{flex:1;overflow-y:auto;min-width:0}
+.topbar{background:var(--black);border-bottom:1px solid rgba(255,255,255,.06);padding:0 28px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.topbar-title{font-size:16px;font-weight:700;color:#ffffff}
+.topbar-right{display:flex;align-items:center;gap:12px}
+.topbar-time{font-family:"JetBrains Mono",monospace;font-size:12px;color:rgba(255,255,255,.45)}
+.badge-countdown{background:rgba(201,168,76,.18);color:var(--gold);border:1px solid rgba(201,168,76,.3);font-size:11px;font-weight:700;font-family:"JetBrains Mono",monospace;padding:5px 12px;border-radius:20px}
+.btn-refresh{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.15);border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;color:rgba(255,255,255,.8);cursor:pointer;transition:all .15s}
+.btn-refresh:hover{border-color:var(--gold);color:var(--gold)}
+.page-sec{padding:28px;display:none}
+.page-sec.active{display:block}
+.page-hdr{margin-bottom:24px}
+.page-hdr h1{font-size:22px;font-weight:800;font-family:"Nunito",sans-serif;margin-bottom:4px}
+.page-hdr p{font-size:13px;color:var(--sub)}
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px;margin-bottom:24px}
+.scard{background:var(--white);border-radius:var(--radius);padding:20px;border:1px solid var(--border);box-shadow:var(--shadow);transition:transform .15s,box-shadow .15s;cursor:default}
+.scard:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.scard-icon{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:14px}
+.scard-val{font-size:28px;font-weight:700;line-height:1;margin-bottom:4px}
+.scard-label{font-size:13px;font-weight:700;font-family:"Nunito",sans-serif;color:var(--text);margin-bottom:2px}
+.scard-sub{font-size:11px;color:var(--muted)}
+.charts-row{display:grid;grid-template-columns:320px 1fr;gap:16px;margin-bottom:24px}
+@media(max-width:1000px){.charts-row{grid-template-columns:1fr}}
+.chart-card{background:var(--white);border-radius:var(--radius);padding:22px;border:1px solid var(--border);box-shadow:var(--shadow)}
+.chart-title{font-size:14px;font-weight:800;font-family:"Nunito",sans-serif;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between}
+.chart-sub{font-size:11px;color:var(--muted);font-weight:400}
+.donut-wrap{display:flex;align-items:center;gap:20px}
+.dlegend{flex:1;display:flex;flex-direction:column;gap:9px}
+.dleg-row{display:flex;align-items:center;gap:8px}
+.dleg-sw{width:9px;height:9px;border-radius:3px;flex-shrink:0}
+.dleg-name{font-size:11px;color:var(--sub);flex:1}
+.dleg-val{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:500;color:var(--text)}
+.dleg-pct{font-size:10px;color:var(--muted);width:32px;text-align:right}
+.bar-chart{display:flex;align-items:flex-end;gap:4px;height:130px}
+.bar-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px}
+.bar-fill{width:100%;border-radius:4px 4px 0 0;min-height:3px;transition:height .4s cubic-bezier(.34,1.56,.64,1);position:relative}
+.bar-fill::after{content:attr(data-tip);position:absolute;top:-26px;left:50%;transform:translateX(-50%);background:var(--text);color:#fff;font-family:"JetBrains Mono",monospace;font-size:10px;padding:2px 7px;border-radius:5px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s;z-index:10}
+.bar-fill:hover::after{opacity:1}
+.bar-lbl{font-size:9px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.tbl-card{background:var(--white);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);overflow:hidden;margin-bottom:22px}
+.tbl-hdr{padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.tbl-hdr-title{font-size:14px;font-weight:800;font-family:"Nunito",sans-serif}
+.tbl-controls{display:flex;align-items:center;gap:10px}
+.search-inp{background:var(--bg);border:1.5px solid var(--border);border-radius:8px;padding:8px 14px;font-family:"Plus Jakarta Sans",sans-serif;font-size:13px;color:var(--text);outline:none;width:240px;transition:border-color .2s}
+.search-inp:focus{border-color:var(--gold)}
+.search-inp::placeholder{color:var(--muted)}
+.btn-csv{display:flex;align-items:center;gap:6px;background:var(--white);border:1.5px solid var(--border);border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;color:var(--sub);cursor:pointer;transition:all .15s;white-space:nowrap}
+.btn-csv:hover{border-color:var(--green);color:var(--green)}
+table{width:100%;border-collapse:collapse}
+thead th{padding:11px 18px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;background:var(--bg);border-bottom:1px solid var(--border)}
+tbody td{padding:12px 18px;border-bottom:1px solid #f0f0f6;font-size:13px;color:var(--sub)}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:#fafafa}
+.td-main{font-weight:600;color:var(--text)}
+.td-mono{font-family:"JetBrains Mono",monospace;font-size:12px}
+.td-num{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted)}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap}
+.badge::before{content:"";width:5px;height:5px;border-radius:50%}
+.b-green{background:var(--green-light);color:var(--green)}.b-green::before{background:var(--green)}
+.b-red{background:var(--red-light);color:var(--red)}.b-red::before{background:var(--red)}
+.b-blue{background:var(--blue-light);color:var(--blue)}.b-blue::before{background:var(--blue)}
+.b-purple{background:var(--purple-light);color:var(--purple)}.b-purple::before{background:var(--purple)}
+.b-gold{background:var(--gold-light);color:var(--gold-dark)}.b-gold::before{background:var(--gold)}
+.b-gray{background:#f0f0f6;color:var(--muted)}.b-gray::before{background:var(--muted)}
+.pagination{padding:14px 22px;border-top:1px solid var(--border);background:var(--bg);display:flex;align-items:center;justify-content:space-between}
+.pg-info{font-size:12px;color:var(--sub)}
+.pg-btns{display:flex;align-items:center;gap:5px}
+.pg-btn{width:30px;height:30px;border-radius:7px;background:var(--white);border:1.5px solid var(--border);color:var(--sub);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.pg-btn:hover:not(:disabled){border-color:var(--gold);color:var(--gold-dark)}
+.pg-btn:disabled{opacity:.35;cursor:not-allowed}
+.pg-cur{height:30px;padding:0 12px;border-radius:7px;background:var(--text);color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center}
+.log-card{background:var(--white);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);overflow:hidden}
+.log-hdr{padding:18px 22px;border-bottom:1px solid var(--border);font-size:14px;font-weight:700}
+.log-body{max-height:360px;overflow-y:auto}
+.log-item{display:grid;grid-template-columns:72px 44px 1fr;gap:12px;padding:9px 22px;border-bottom:1px solid #f5f5fa;font-size:11px;font-family:"JetBrains Mono",monospace}
+.log-item:last-child{border-bottom:none}
+.log-item:hover{background:var(--bg)}
+.log-ts{color:var(--muted)}
+.lv-info{color:var(--blue);font-weight:600}
+.lv-warn{color:#d97706;font-weight:600}
+.lv-error{color:var(--red);font-weight:600}
+.log-txt{color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{text-align:center;padding:40px;color:var(--muted)}
+.empty .ei{font-size:32px;margin-bottom:10px}
+.empty p{font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinning{animation:spin .6s linear infinite;display:inline-block}
+</style>
+</head>
+<body>
+
+<div id="lock">
+  <div class="lock-wrap">
+    <div style="text-align:center;margin-bottom:16px"><img src="https://i.postimg.cc/MKYXvzvw/ST-(1).png" alt="ST666" style="height:50px;object-fit:contain" onerror="this.style.display='none'"></div>
+    <div class="lock-tagline">Invoice Middleware &middot; Admin Panel</div>
+    <div class="lock-card">
+      <h2>Đăng nhập quản trị</h2>
+      <p>Nhập Admin API Key để truy cập dashboard</p>
+      <div class="flabel">API Key</div>
+      <input type="password" class="finp" id="keyInp" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="btnlogin" onclick="doLogin()">Truy cập Dashboard &rarr;</button>
+      <div class="lockerr" id="lockErr"></div>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sb-logo">
+        <img src="https://i.postimg.cc/MKYXvzvw/ST-(1).png" alt="ST666" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+        <div class="sb-logo-sub">Analytics Dashboard</div>
+      </div>
+      <nav class="sb-nav">
+        <div class="sb-sec">Tổng quan</div>
+        <div class="sb-item active" onclick="showPage('overview',this)"><span>📊</span> Tổng quan</div>
+        <div class="sb-item" onclick="showPage('history',this)"><span>📋</span> Lịch sử đơn</div>
+        <div class="sb-sec">Hệ thống</div>
+        <div class="sb-item" onclick="showPage('logs',this)"><span>🗒️</span> System Logs</div>
+      </nav>
+      <div class="sb-footer">
+        <div class="sb-status"><div class="status-dot"></div><span>Hệ thống hoạt động</span></div>
+      </div>
+    </aside>
+
+    <div class="content">
+      <div class="topbar">
+        <div class="topbar-title" id="page-title">Tổng quan</div>
+        <div class="topbar-right">
+          <span class="topbar-time" id="hdr-time"></span>
+          <div class="badge-countdown" id="cd">30s</div>
+          <button class="btn-refresh" onclick="loadAll()"><span id="spin-ico">&#8635;</span> Làm mới</button>
+        </div>
+      </div>
+
+      <!-- OVERVIEW -->
+      <div class="page-sec active" id="page-overview">
+        <div class="page-hdr"><h1>Tổng quan</h1><p>Thống kê toàn bộ hóa đơn và trạng thái xử lý</p></div>
+        <div class="cards-grid" id="stat-cards"></div>
+        <div class="charts-row">
+          <div class="chart-card">
+            <div class="chart-title">Phân bổ trạng thái <span class="chart-sub" id="donut-total"></span></div>
+            <div class="donut-wrap">
+              <svg id="donut-svg" width="130" height="130" viewBox="0 0 130 130"></svg>
+              <div class="dlegend" id="dlegend"></div>
+            </div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">Đơn theo giờ <span class="chart-sub">14 ngày gần nhất</span></div>
+            <div class="bar-chart" id="bar-chart"></div>
+          </div>
+        </div>
+        <div class="tbl-card">
+          <div class="tbl-hdr">
+            <div class="tbl-hdr-title">Đơn gần nhất</div>
+            <button class="btn-csv" onclick="showPage('history',document.querySelectorAll('.sb-item')[1])">Xem tất cả &rarr;</button>
+          </div>
+          <table><thead><tr><th>Username</th><th>Mã CK</th><th>Trạng thái</th><th>Thời gian</th></tr></thead>
+          <tbody id="mini-tbl"></tbody></table>
+        </div>
+      </div>
+
+      <!-- HISTORY -->
+      <div class="page-sec" id="page-history">
+        <div class="page-hdr"><h1>Lịch sử đơn</h1><p>Toàn bộ hóa đơn đã tra cứu và xử lý</p></div>
+        <div class="tbl-card">
+          <div class="tbl-hdr">
+            <div class="tbl-hdr-title" id="tbl-count">—</div>
+            <div class="tbl-controls">
+              <input class="search-inp" id="tbl-search" placeholder="🔍  Tìm username, mã CK, trạng thái..." oninput="filterTable()">
+              <button class="btn-csv" onclick="exportCSV()">&#11015; Xuất CSV</button>
+            </div>
+          </div>
+          <table><thead><tr><th>#</th><th>Username</th><th>Mã CK</th><th>Trạng thái</th><th>Ghi chú</th><th>Thời gian</th></tr></thead>
+          <tbody id="tbl-body"></tbody></table>
+          <div id="tbl-empty" class="empty" style="display:none"><div class="ei">🔍</div><p>Không tìm thấy kết quả</p></div>
+          <div class="pagination">
+            <span class="pg-info" id="pg-info">—</span>
+            <div class="pg-btns">
+              <button class="pg-btn" id="pg-prev" onclick="changePage(-1)">&#8249;</button>
+              <div class="pg-cur" id="pg-cur">1</div>
+              <button class="pg-btn" id="pg-next" onclick="changePage(1)">&#8250;</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div class="page-sec" id="page-logs">
+        <div class="page-hdr"><h1>System Logs</h1><p>50 log gần nhất từ hệ thống</p></div>
+        <div class="log-card">
+          <div class="log-hdr">Log hệ thống</div>
+          <div class="log-body" id="log-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var API_KEY='',BASE=window.location.origin,allRows=[],filteredRows=[],PAGE=1,PS=25,cdn=30,timer=null;
+
+async function doLogin(){
+  var k=document.getElementById('keyInp').value.trim();if(!k)return;
+  document.getElementById('lockErr').textContent='';
+  try{
+    var r=await fetch(BASE+'/admin/stats',{headers:{'x-admin-key':k}});
+    if(r.status===401){document.getElementById('lockErr').textContent='❌ API key không đúng';return;}
+    API_KEY=k;
+    document.getElementById('lock').style.display='none';
+    document.getElementById('app').style.display='block';
+    loadAll();startTimer();startClock();
+  }catch(e){document.getElementById('lockErr').textContent='❌ Lỗi kết nối';}
+}
+
+async function api(p){return(await fetch(BASE+p,{headers:{'x-admin-key':API_KEY}})).json();}
+
+async function loadAll(){
+  var ico=document.getElementById('spin-ico');ico.className='spinning';
+  try{
+    var[stats,logs]=await Promise.all([api('/admin/invoice-stats'),api('/admin/logs?limit=50')]);
+    renderCards(stats);renderDonut(stats);renderBars(stats);renderMini(stats);renderFull(stats);renderLogs(logs);
+  }catch(e){console.error(e);}
+  ico.className='';cdn=30;
+}
+
+var PT={'overview':'Tổng quan','history':'Lịch sử đơn','logs':'System Logs'};
+function showPage(id,el){
+  document.querySelectorAll('.page-sec').forEach(function(p){p.classList.remove('active')});
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.sb-item').forEach(function(i){i.classList.remove('active')});
+  if(el)el.classList.add('active');
+  document.getElementById('page-title').textContent=PT[id]||id;
+}
+
+var ICONS=['📦','✅','⏳','❌','⚠️','🏦'];
+var IBGS=['#fef3c7','#dcfce7','#f0f0f8','#fee2e2','#ede9fe','#dbeafe'];
+function renderCards(c){
+  var sc=c.byStatus||{};
+  var im=c.invoices||[];
+  var cards=[
+    {l:'Tổng đơn',v:c.total||0,s:'đơn thực tế'},
+    {l:'Đã lên điểm',v:sc['Đã lên điểm']||0,s:'xử lý thành công'},
+    {l:'Chờ xử lý',v:sc['-']||0,s:'chưa có trạng thái'},
+    {l:'Chưa nhận được',v:sc['Chưa nhận được']||0,s:'cần tra soát'},
+    {l:'Lệnh sai số tiền',v:sc['Lệnh sai số tiền']||0,s:'sai số tiền'},
+    {l:'Sai ngân hàng',v:sc['Sai ngân hàng/người nhận']||0,s:'sai NH/người nhận'},
+  ];
+  document.getElementById('stat-cards').innerHTML=cards.map(function(c,i){
+    return '<div class="scard"><div class="scard-icon" style="background:'+IBGS[i]+'">'+ICONS[i]+'</div>'+
+    '<div class="scard-val">'+c.v+'</div><div class="scard-label">'+c.l+'</div>'+
+    '<div class="scard-sub">'+c.s+'</div></div>';
+  }).join('');
+}
+
+var SC={'Đã lên điểm':'#16a34a','Chưa nhận được':'#dc2626','Lệnh sai số tiền':'#7c3aed','Sai ngân hàng/người nhận':'#2563eb','Khác':'#d97706','-':'#e0e0ec'};
+function renderDonut(c){
+  var sc=c.byStatus||{},total=c.total||1;
+  document.getElementById('donut-total').textContent=(c.total||0)+' tổng';
+  var entries=Object.entries(sc).sort(function(a,b){return b[1]-a[1]});
+  var r=50,cx=65,cy=65,sw=18,circ=2*Math.PI*r,off=0;
+  var paths=entries.map(function(e){
+    var pct=e[1]/total,dash=pct*circ,gap=circ-dash,col=SC[e[0]]||'#ccc';
+    var p='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="'+sw+'" stroke-dasharray="'+dash+' '+gap+'" stroke-dashoffset="'+(-(off)*circ)+'" transform="rotate(-90 '+cx+' '+cy+')" stroke-linecap="round"/>';
+    off+=pct;return p;
+  }).join('');
+  document.getElementById('donut-svg').innerHTML=
+    '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#f0f0f8" stroke-width="'+sw+'"/>'+paths+
+    '<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" font-family="Plus Jakarta Sans" font-weight="700" font-size="22" fill="#1a1a2e">'+(c.total||0)+'</text>'+
+    '<text x="'+cx+'" y="'+(cy+12)+'" text-anchor="middle" font-family="Plus Jakarta Sans" font-size="11" fill="#a0a0b5">đơn</text>';
+  document.getElementById('dlegend').innerHTML=entries.slice(0,5).map(function(e){
+    var col=SC[e[0]]||'#ccc',pct=Math.round(e[1]/total*100),name=e[0]==='-'?'Chưa xử lý':e[0];
+    return '<div class="dleg-row"><div class="dleg-sw" style="background:'+col+'"></div>'+
+      '<span class="dleg-name">'+(name.length>18?name.slice(0,18)+'…':name)+'</span>'+
+      '<span class="dleg-val">'+e[1]+'</span><span class="dleg-pct">'+pct+'%</span></div>';
+  }).join('');
+}
+
+function renderBars(c){
+  // Dùng byDate để vẽ bar chart 14 ngày gần nhất
+  var byDate=c.byDate||{};
+  var dates=[];
+  for(var i=13;i>=0;i--){
+    var d=new Date(Date.now()+7*3600000-i*86400000);
+    dates.push(d.toISOString().slice(0,10));
+  }
+  var vals=dates.map(function(d){return byDate[d]||0;});
+  var mx=Math.max(...vals,1);
+  document.getElementById('bar-chart').innerHTML=vals.map(function(v,i){
+    var pct=Math.max(v/mx*100,v>0?6:2).toFixed(0);
+    var lbl=dates[i].slice(5); // MM-DD
+    return '<div class="bar-item"><div class="bar-fill" style="height:'+pct+'%;background:'+(v>0?'var(--gold)':'#f0f0f6')+'" data-tip="'+v+' đơn &middot; '+lbl+'"></div>'+
+      '<div class="bar-lbl">'+(i%4===0?lbl:'')+'</div></div>';
+  }).join('');
+}
+
+function renderMini(c){
+  var rows=(c.invoices||[]).slice(0,8);
+  document.getElementById('mini-tbl').innerHTML=rows.length?rows.map(function(r){
+    return '<tr><td class="td-main">'+(r.username||'-')+'</td><td class="td-mono">'+(r.ck_code||'-')+'</td>'+
+      '<td>'+sbadge(r.status)+'</td><td class="td-mono" style="color:var(--muted)">'+ft(r.cached_at)+'</td></tr>';
+  }).join(''):'<tr><td colspan="4" class="empty"><p>Chưa có dữ liệu</p></td></tr>';
+}
+
+function mergeStatus(c){
+  // Build map: parentId → latest status from textCache
+  var txtMap={};
+  (c?.texts||[]).forEach(function(t){
+    if(t.parent&&t.status&&t.status!=='-'){
+      txtMap[t.parent]=t.status;
+    }
+  });
+  // Merge into images
+  return (c?.images||[]).map(function(img){
+    var merged=Object.assign({},img);
+    if(txtMap[img.msgId]){merged.status=txtMap[img.msgId];}
+    return merged;
+  });
+}
+
+function renderFull(c){
+  allRows=c.invoices||[];
+  filterTable();
+}
+
+function filterTable(){
+  var q=(document.getElementById('tbl-search')?.value||'').toLowerCase();
+  filteredRows=q?allRows.filter(function(r){
+    return[(r.username||''),(r.ck_code||''),(r.status||''),(r.note||'')].some(function(s){return s.toLowerCase().includes(q)});
+  }):allRows;
+  PAGE=1;renderPage();
+  document.getElementById('tbl-count').textContent=filteredRows.length+' đơn'+(q?' (đang lọc)':'');
+}
+
+function renderPage(){
+  var tot=filteredRows.length,pages=Math.ceil(tot/PS)||1,st=(PAGE-1)*PS,sl=filteredRows.slice(st,st+PS);
+  document.getElementById('pg-info').textContent='Hiển thị '+(st+1)+'–'+Math.min(st+PS,tot)+' / '+tot;
+  document.getElementById('pg-cur').textContent=PAGE;
+  document.getElementById('pg-prev').disabled=PAGE<=1;
+  document.getElementById('pg-next').disabled=PAGE>=pages;
+  if(!sl.length){document.getElementById('tbl-empty').style.display='block';document.getElementById('tbl-body').innerHTML='';return;}
+  document.getElementById('tbl-empty').style.display='none';
+  document.getElementById('tbl-body').innerHTML=sl.map(function(r,i){
+    var note=r.note||'-';if(note.length>40)note=note.slice(0,40)+'…';
+    return '<tr><td class="td-num">'+(st+i+1)+'</td><td class="td-main">'+(r.username||'-')+'</td>'+
+      '<td class="td-mono">'+(r.ck_code||'-')+'</td><td>'+sbadge(r.status)+'</td>'+
+      '<td style="font-size:12px;color:var(--sub)">'+note+'</td>'+
+      '<td class="td-mono" style="color:var(--muted)">'+ft(r.cached_at)+'</td></tr>';
+  }).join('');
+}
+function changePage(d){PAGE+=d;renderPage();}
+
+function exportCSV(){
+  var lines=[['#','Username','Mã CK','Trạng thái','Ghi chú','Thời gian'].join(',')];
+  filteredRows.forEach(function(r,i){
+    lines.push([i+1,q(r.username),q(r.ck_code),q(r.status),q(r.note),q(ft(r.cached_at))].join(','));
+  });
+  var blob=new Blob(['\uFEFF'+lines.join('\n')],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='st666_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
+}
+function q(s){return '"'+(s||'').replace(/"/g,"'")+'"';}
+
+function renderLogs(d){
+  var logs=(d?.logs||[]).slice().reverse();
+  document.getElementById('log-body').innerHTML=logs.length?logs.map(function(l){
+    var ts=l.ts?new Date(l.ts).toLocaleTimeString('vi-VN',{timeZone:'Asia/Ho_Chi_Minh'}):'-';
+    var lv=l.level||'info',meta=l.meta&&Object.keys(l.meta).length?' — '+JSON.stringify(l.meta).slice(0,80):'';
+    return '<div class="log-item"><span class="log-ts">'+ts+'</span>'+
+      '<span class="lv-'+lv+'">'+lv.toUpperCase()+'</span>'+
+      '<span class="log-txt">'+(l.msg||l.message||'')+meta+'</span></div>';
+  }).join(''):'<div class="empty"><div class="ei">📭</div><p>Không có log</p></div>';
+}
+
+function ft(iso){if(!iso)return '-';return new Date(new Date(iso).getTime()+7*3600000).toISOString().replace('T',' ').slice(0,16);}
+function sbadge(s){var m={'Đã lên điểm':'b-green','Chưa nhận được':'b-red','Lệnh sai số tiền':'b-purple','Sai ngân hàng/người nhận':'b-blue','Khác':'b-gold','-':'b-gray'};return '<span class="badge '+(m[s]||'b-gold')+'">'+(s==='-'?'Chưa xử lý':s||'-')+'</span>';}
+function startTimer(){clearInterval(timer);timer=setInterval(function(){cdn--;document.getElementById('cd').textContent=cdn+'s';if(cdn<=0)loadAll();},1000);}
+function startClock(){setInterval(function(){document.getElementById('hdr-time').textContent=new Date().toLocaleTimeString('vi-VN',{timeZone:'Asia/Ho_Chi_Minh'});},1000);}
+</script>
+</body>
+</html>

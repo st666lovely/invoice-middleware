@@ -691,6 +691,31 @@ async function warmupCache(webhookUrl) {
   }
 }
 
+// ── BO Auto Credit Cache ──────────────────────────────────────────────────────
+// Lưu các đơn tự tra BO ra kết quả đã lên điểm (nguồn: DEPOSIT_RECORD)
+const boCreditCache = new Map(); // username+ck → entry
+
+function addBoCredit({ username, ckCode, depositAmt, depositTime }) {
+  if (!username) return;
+  const key = (username + '|' + (ckCode || '')).toLowerCase();
+  boCreditCache.set(key, {
+    username,
+    ck_code:     ckCode   || null,
+    depositAmt:  depositAmt  || 0,
+    depositTime: depositTime || Date.now(),
+    cached_at:   Date.now(),
+    source:      'bo',
+    status:      'Đã lên điểm',
+  });
+  logger.info("BO credit recorded", { username, ckCode, depositAmt });
+}
+
+function getBoCreditStats() {
+  const list = [...boCreditCache.values()]
+    .sort((a, b) => b.cached_at - a.cached_at);
+  return { total: list.length, list };
+}
+
 // ── Invoice Stats ─────────────────────────────────────────────────────────────
 function getInvoiceStats() {
   // Build parentId → latest status từ textCache
@@ -802,4 +827,4 @@ const telegramService = {
   buildCskhKeyboard,
 };
  
-module.exports = { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice };
+module.exports = { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice, addBoCredit, getBoCreditStats };

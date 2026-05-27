@@ -8,7 +8,7 @@ const cors     = require("cors");
 const helmet   = require("helmet");
 const rateLimit = require("express-rate-limit");
 const multer   = require("multer");
-const { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice } = require("./telegram");
+const { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice, addBoCredit, getBoCreditStats } = require("./telegram");
 const { fetchDepositRemarkByUsername } = require("./boBrowser");
 const { lookupDeposit, invalidateDepositCache } = require("./st666api");
 const logger = require("./logger");
@@ -155,6 +155,7 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
         const time = new Date(bo.depositTime)
           .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
         const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
+        addBoCredit({ username, ckCode: transferContent, depositAmt: bo.depositAmt, depositTime: bo.depositTime });
         return res.json({
           found:    true,
           status:   "Đã lên điểm",
@@ -172,6 +173,36 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
           username,
           ck:       transferContent || null,
         });
+      }
+    }
+
+      // Fallback: boBrowser (Playwright) nếu lookupDeposit không tìm được
+      try {
+        const boResult = await fetchDepositRemarkByUsername(username, transferContent);
+        if (boResult && typeof boResult === "object" && boResult.alreadyCredited) {
+          const time = new Date(boResult.depositTime)
+            .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+          const amt  = Number(boResult.depositAmt).toLocaleString("vi-VN");
+          addBoCredit({ username, ckCode: transferContent, depositAmt: boResult.depositAmt, depositTime: boResult.depositTime });
+          return res.json({
+            found:    true,
+            status:   "Đã lên điểm",
+            note:     `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
+            username,
+            ck:       transferContent || null,
+          });
+        }
+        if (boResult && typeof boResult === "string") {
+          return res.json({
+            found:    true,
+            status:   "Đang xử lý",
+            note:     "Hóa đơn đang chờ được duyệt",
+            username,
+            ck:       transferContent || null,
+          });
+        }
+      } catch (e) {
+        logger.warn("check-invoice boBrowser fallback failed", { error: e.message, username });
       }
     }
 
@@ -223,6 +254,7 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
           .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
         const amt  = Number(depositRemark.depositAmt).toLocaleString("vi-VN");
         logger.info("Deposit already credited, skip escalate", { username, amt, time });
+        addBoCredit({ username, ckCode: transferContent, depositAmt: depositRemark.depositAmt, depositTime: depositRemark.depositTime });
         return res.json({
           ok:              true,
           alreadyCredited: true,
@@ -340,7 +372,9 @@ app.get("/admin/cache/inspect", adminAuth, (_req, res) => {
 });
 
 app.get("/admin/invoice-stats", adminAuth, (_req, res) => {
-  res.json({ ok: true, ...getInvoiceStats() });
+  const stats = getInvoiceStats();
+  const boCredits = getBoCreditStats();
+  res.json({ ok: true, ...stats, boCredits });
 });
 
 app.post("/admin/cache/warmup", adminAuth, async (req, res) => {

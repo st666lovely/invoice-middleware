@@ -97,6 +97,9 @@ async function _doLogin() {
  
     const finalUrl = page.url();
     if (finalUrl.includes("/login")) {
+      const html = await page.content().catch(() => "");
+      const plainText = html.replace(/<[^>]+>/g, " ").replace(/ +/g, " ").slice(0, 400);
+      logger.error("BO login stuck", { url: finalUrl, pageText: plainText });
       throw new Error(`Vẫn ở trang login sau khi click - URL: ${finalUrl}`);
     }
  

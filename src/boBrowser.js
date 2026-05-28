@@ -76,13 +76,31 @@ async function _doLogin() {
       throw new Error("Không tìm thấy ô login");
     }
  
-    await userSel.fill(BO_USERNAME);
-    await page.fill("#password", BO_PASSWORD).catch(() =>
-      page.fill('[data-testid="login-password"]', BO_PASSWORD)
-    );
+    // Dùng triple-click + type để trigger React onChange đúng cách
+    await userSel.click({ clickCount: 3 });
+    await userSel.type(BO_USERNAME, { delay: 50 });
  
-    // ✅ Fix 3: Tách click và waitForURL, thêm waitForLoadState
-    await page.click('button:has-text("Login")');
+    const passSel = await page.$('#password') ||
+                    await page.$('[data-testid="login-password"]') ||
+                    await page.$('input[type="password"]');
+    if (passSel) {
+      await passSel.click({ clickCount: 3 });
+      await passSel.type(BO_PASSWORD, { delay: 50 });
+    }
+ 
+    await page.waitForTimeout(500);
+ 
+    // Thử click Login button với nhiều selector khác nhau
+    const loginBtn = await page.$('button:has-text("Login")') ||
+                     await page.$('button:has-text("login")') ||
+                     await page.$('button:has-text("LOGIN")') ||
+                     await page.$('button[type="submit"]') ||
+                     await page.$('input[type="submit"]');
+    if (loginBtn) {
+      await loginBtn.click();
+    } else {
+      await page.keyboard.press("Enter");
+    }
  
     // Chờ navigation với fallback
     await Promise.race([

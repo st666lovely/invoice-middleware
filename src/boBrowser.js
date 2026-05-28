@@ -79,9 +79,27 @@ async function getSession() {
     }
 
     await userSel.fill(BO_USERNAME);
-    await page.fill("#password", BO_PASSWORD).catch(() =>
-      page.fill('[data-testid="login-password"]', BO_PASSWORD)
-    );
+
+await page.fill("#password", BO_PASSWORD).catch(() =>
+  page.fill('[data-testid="login-password"]', BO_PASSWORD)
+);
+
+// ✅ Trigger blur/change events để form "biết" đã nhập xong
+await page.keyboard.press("Tab");         // blur khỏi password field
+await page.waitForTimeout(500);           // chờ JS xử lý validation
+
+// ✅ Click đúng button
+await page.click('button.nrc-button[type="button"]'); // thêm class để chính xác hơn
+
+// Chờ navigation
+await Promise.race([
+  page.waitForURL(url => !url.toString().includes("/login"), { timeout: 60_000 }),
+  page.waitForLoadState("networkidle", { timeout: 60_000 }),
+]).catch(async (err) => {
+  const currentUrl = page.url();
+  logger.warn("waitForURL race timeout", { currentUrl });
+  if (currentUrl.includes("/login")) throw err;
+});
 
     // ✅ Fix 3: Tách click và waitForURL, thêm waitForLoadState
     await page.click('button:has-text("Login")');

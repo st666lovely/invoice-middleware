@@ -1,39 +1,22 @@
 "use strict";
 /**
  * ST666 Internal API Client — Deposit Remark via deposits/search
+ *
+ * Auth: dùng chung session từ boBrowser.js
+ * → KHÔNG tự login riêng, tránh duplicate session gây khóa tài khoản BO.
  */
 
-const axios  = require("axios");
-const crypto = require("crypto");
-const logger = require("./logger");
+const axios      = require("axios");
+const logger     = require("./logger");
+const { getSession } = require("./boBrowser"); // ← dùng chung, không login 2 lần
 
-const BASE    = process.env.ST666_API_BASE || "https://boapi.bo666st.com/vh7prod-ims/api/v1";
-const BO_USER = process.env.ST666_BO_USER  || process.env.BO_USERNAME;
-const BO_PASS = process.env.ST666_BO_PASS  || process.env.ST666_BO_PASSWORD || process.env.BO_PASSWORD;
+const BASE = process.env.ST666_API_BASE || "https://boapi.bo666st.com/vh7prod-ims/api/v1";
 
 // Threshold chung — đồng bộ với boBrowser.js
 const CREDITED_THRESHOLD_MS = 30 * 60 * 1000;
 
-function sha1(str) {
-  return crypto.createHash("sha1").update(str).digest("hex");
-}
-
-// ── Token cache + MUTEX ───────────────────────────────────────────────────────
-let _token        = null;
-let _tokenExpiry  = 0;
-let _loginPromise = null;
-
-function parseJwtExpiry(jwt) {
-  try {
-    const raw     = String(jwt).replace(/^Bearer\s+/i, "");
-    const payload = JSON.parse(Buffer.from(raw.split(".")[1], "base64url").toString());
-    return payload.exp ? payload.exp * 1000 : Date.now() + 3600000;
-  } catch {
-    return Date.now() + 3600000;
-  }
-}
-
-function buildHeaders(token) {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function buildHeaders(session) {
   return {
     "Accept":          "*/*",
     "Accept-Language": "en-US,en;q=0.9",
@@ -41,45 +24,15 @@ function buildHeaders(token) {
     "Referer":         "https://bo.bo666st.com/",
     "X-Currency":      "VND2",
     "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    ...(token ? { "Authorization": token } : {}),
+    "Cookie":          session.cookieHeader,
+    ...(session.authToken ? { "Authorization": session.authToken } : {}),
   };
 }
 
-async function login() {
-  if (!BO_USER || !BO_PASS) throw new Error("ST666_BO_USER / ST666_BO_PASS chưa được cấu hình");
-
-  logger.info("ST666 login...");
-  const res  = await axios.post(`${BASE}/login`, { userid: BO_USER, password: sha1(BO_PASS) }, {
-    headers: buildHeaders(null),
-    timeout: 12000,
-  });
-
-  const data  = res.data;
-  const token = data?.token || data?.accessToken || data?.access_token
-             || data?.data?.token || data?.data?.accessToken
-             || res.headers?.["x-token-renew"] || res.headers?.["authorization"];
-
-  if (!token) throw new Error("Login OK nhưng không tìm thấy token. Response: " + JSON.stringify(data).slice(0, 200));
-
-  _token       = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-  _tokenExpiry = parseJwtExpiry(_token);
-
-  logger.info("ST666 login OK", { user: BO_USER, expiry: new Date(_tokenExpiry).toISOString() });
-  return _token;
-}
-
-async function getToken() {
-  if (_token && Date.now() < _tokenExpiry - 60000) return _token;
-  if (_loginPromise) return _loginPromise;
-  _loginPromise = login().finally(() => { _loginPromise = null; });
-  return _loginPromise;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function getDateParts(dayRange = 7) {
-  const now      = Date.now();
-  const todayVN  = new Date(now + 7 * 3600000).toISOString().slice(0, 10);
-  const startVN  = new Date(now - dayRange * 86400000 + 7 * 3600000).toISOString().slice(0, 10);
+  const now     = Date.now();
+  const todayVN = new Date(now + 7 * 3600000).toISOString().slice(0, 10);
+  const startVN = new Date(now - dayRange * 86400000 + 7 * 3600000).toISOString().slice(0, 10);
   return {
     dateFrom:  startVN,
     dateTo:    todayVN,
@@ -145,7 +98,7 @@ function extractDepositRemark(deposit) {
 
 // ── Core search ───────────────────────────────────────────────────────────────
 async function searchDepositsByStatus(username, statusType, dayRange = 1) {
-  const token = await getToken();
+  const session = await getSession(); // dùng chung session với boBrowser.js
   const { dateFrom, dateTo, starttime, endtime } = getDateParts(dayRange);
 
   const res = await axios.get(`${BASE}/deposits/search`, {
@@ -162,7 +115,7 @@ async function searchDepositsByStatus(username, statusType, dayRange = 1) {
       timefilter: "deposittime",
       zoneType:   "ASIA_HO_CHI_MINH",
     },
-    headers: buildHeaders(token),
+    headers: buildHeaders(session),
     timeout: 15000,
   });
 
@@ -182,7 +135,7 @@ async function searchDeposits(username, dayRange = 7) {
 }
 
 // ── Deposit lookup cache (5 phút TTL) ─────────────────────────────────────────
-const _depositCache    = new Map();
+const _depositCache     = new Map();
 const DEPOSIT_CACHE_TTL = 5 * 60 * 1000;
 
 // Sweep cache mỗi 10 phút — tránh memory leak
@@ -296,7 +249,7 @@ async function lookupDeposit(username) {
     }
 
     result = { status: "notfound" };
-    _depositCache.set(key, { result, expiry: Date.now() + 60000 }); // notfound cache 1 phút
+    _depositCache.set(key, { result, expiry: Date.now() + 60000 });
     return result;
 
   } catch (err) {

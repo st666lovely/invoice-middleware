@@ -270,4 +270,4 @@ async function fetchDepositRemarkByUsername(username) {
   }
 }
 
-module.exports = { fetchDepositRemarkByUsername };
+module.exports = { fetchDepositRemarkByUsername, getSession };

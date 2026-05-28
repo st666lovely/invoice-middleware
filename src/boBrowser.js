@@ -1,5 +1,10 @@
 "use strict";
 
+/**
+ * BO Browser — login qua Playwright lấy cookies,
+ * sau đó dùng axios gọi API trực tiếp với cookies đó.
+ */
+
 const axios  = require("axios");
 const logger = require("./logger");
 
@@ -19,15 +24,16 @@ const BO_USERNAME  = process.env.BO_USERNAME;
 const BO_PASSWORD  = process.env.BO_PASSWORD;
 
 // ── Session cache + MUTEX ─────────────────────────────────────────────────────
-let _session      = null;
-let _loginPromise = null;   // <-- MUTEX: chỉ 1 login chạy tại 1 thời điểm
+// _loginPromise đảm bảo dù có 10 request đến cùng lúc, chỉ có 1 browser login chạy.
+// Các request còn lại chờ promise đó resolve thay vì tạo thêm browser mới.
+let _session      = null;  // { cookieHeader, authToken, expiry }
+let _loginPromise = null;  // mutex
 
 async function getSession() {
   if (_session && Date.now() < _session.expiry) return _session;
 
-  // Nếu đang có login đang chạy, chờ kết quả đó thay vì tạo login mới
   if (_loginPromise) {
-    logger.info("BO login already in progress, waiting...");
+    logger.info("BO login already in progress, waiting for existing login...");
     return _loginPromise;
   }
 
@@ -79,7 +85,10 @@ async function _doLogin() {
       page.waitForSelector('input[placeholder="User Name"]', { state: "visible", timeout: 30_000 }),
     ]).catch(() => null);
 
-    if (!userSel) throw new Error("Không tìm thấy ô login");
+    if (!userSel) {
+      await page.screenshot({ path: "/tmp/bo-no-input.png" }).catch(() => {});
+      throw new Error("Không tìm thấy ô login username");
+    }
 
     await userSel.fill(BO_USERNAME);
     await page.fill("#password", BO_PASSWORD).catch(() =>
@@ -87,70 +96,97 @@ async function _doLogin() {
     );
     await page.waitForTimeout(500);
 
-    // Click login và chờ navigation — KHÔNG dùng waitForURL vì dễ timeout trên SPA
-    await page.click('button:has-text("Login")');
+    // ── Click Login ───────────────────────────────────────────────────────────
+    // Button DOM: <button class="nrc-button" type="button">Login</button>
+    // type="button" → KHÔNG phải submit → KHÔNG trigger browser navigation.
+    // Đây là React SPA dùng React Router navigate() ở client-side.
+    // → KHÔNG dùng waitForURL với waitUntil:"load" (load event không xảy ra).
+    // → Dùng waitUntil:"commit" để catch client-side URL change.
+    await page.click("button.nrc-button");
 
-    // Chờ URL đổi HOẶC element dashboard xuất hiện — linh hoạt hơn
-    await Promise.race([
-      page.waitForURL(url => !url.toString().includes("/login"), {
-        timeout:   60_000,
-        waitUntil: "commit",   // "commit" nhanh hơn "load", đủ để biết đã navigate
-      }),
-      page.waitForSelector('[class*="dashboard"], [class*="main-content"], nav.sidebar, .layout-wrapper', {
-        state:   "visible",
-        timeout: 60_000,
-      }),
-    ]);
+    // Chờ 1 trong 2 kết quả: URL đổi (thành công) hoặc errormsg có text (thất bại)
+    const result = await Promise.race([
+      page.waitForURL(
+        url => !url.toString().includes("/login"),
+        { timeout: 60_000, waitUntil: "commit" }
+      ).then(() => "success"),
 
-    // Kiểm tra không bị redirect về login (sai mật khẩu)
-    const currentUrl = page.url();
-    if (currentUrl.includes("/login")) {
-      const errorMsg = await page.$eval(
-        '[class*="error"], [class*="alert"], .login-error',
-        el => el.textContent.trim()
-      ).catch(() => "unknown error");
-      throw new Error(`Login thất bại, vẫn ở trang login: ${errorMsg}`);
+      page.waitForFunction(
+        () => {
+          const el = document.querySelector("h5.errormsg");
+          return el && el.textContent?.trim().length > 0;
+        },
+        { timeout: 60_000 }
+      ).then(() => "error"),
+    ]).catch(err => {
+      // Cả 2 đều timeout — ghi log để debug
+      logger.warn("BO waitForURL + errormsg both timed out", { error: err.message });
+      return "timeout";
+    });
+
+    // Chụp ảnh để debug nếu cần
+    await page.screenshot({ path: "/tmp/bo-after-login.png" }).catch(() => {});
+
+    if (result === "error") {
+      const errText = await page
+        .$eval("h5.errormsg", el => el.textContent?.trim())
+        .catch(() => "unknown error");
+      // Đây là lỗi xác thực thật sự → throw để caller biết, KHÔNG retry tự động
+      throw new Error(`BO login thất bại: "${errText}"`);
+    }
+
+    if (result === "timeout" || page.url().includes("/login")) {
+      throw new Error(`BO login timeout — vẫn ở /login sau 60s (url: ${page.url()})`);
     }
 
     logger.info("BO browser logged in", { url: page.url() });
 
+    // Lấy cookies từ browser
     const cookies      = await context.cookies();
     const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
 
+    // Lấy token từ localStorage nếu không bắt được từ response
     if (!authToken) {
       authToken = await page.evaluate(() =>
-        localStorage.getItem("token")        ||
-        localStorage.getItem("authToken")     ||
-        localStorage.getItem("access_token")  ||
-        sessionStorage.getItem("token")       ||
+        localStorage.getItem("token")         ||
+        localStorage.getItem("authToken")      ||
+        localStorage.getItem("access_token")   ||
+        sessionStorage.getItem("token")        ||
         null
       ).catch(() => null);
     }
 
-    logger.info("BO session obtained", { cookieCount: cookies.length, hasToken: !!authToken });
+    logger.info("BO session obtained", {
+      cookieCount: cookies.length,
+      hasToken:    !!authToken,
+    });
 
     _session = {
       cookieHeader,
       authToken: authToken
         ? (authToken.startsWith("Bearer ") ? authToken : `Bearer ${authToken}`)
         : null,
-      expiry: Date.now() + 20 * 60 * 1000,
+      expiry: Date.now() + 20 * 60 * 1000,  // 20 phút
     };
 
     return _session;
 
   } catch (err) {
-    // Chỉ reset session nếu là lỗi thực sự (không phải timeout mạng tạm thời)
-    // Timeout thỉnh thoảng xảy ra trên Render — không nên reset ngay để tránh login storm
-    const isAuthFailure = err.message?.includes("Login thất bại");
+    const isAuthFailure = err.message?.includes("BO login thất bại");
+
     if (isAuthFailure) {
-      logger.error("BO login auth failure — sai credentials hoặc bị khóa", { error: err.message });
+      // Sai credentials hoặc bị khóa → reset session, KHÔNG tự retry
+      logger.error("BO login auth failure — kiểm tra credentials hoặc tài khoản bị khóa", {
+        error: err.message,
+      });
       _session = null;
     } else {
-      logger.warn("BO login timeout/network error — giữ session cũ nếu còn", { error: err.message });
-      // Nếu session cũ vẫn còn hạn (race condition), giữ nguyên
-      // Nếu không có session cũ, _session vẫn null nhưng _loginPromise đã clear
+      // Timeout mạng / Render cold-start → giữ session cũ nếu còn hạn
+      logger.warn("BO login network/timeout error — giữ session cũ nếu còn hạn", {
+        error: err.message,
+      });
     }
+
     throw err;
 
   } finally {
@@ -158,3 +194,126 @@ async function _doLogin() {
     await browser.close().catch(() => {});
   }
 }
+
+// ── Helper: gọi deposits/search với statusType bất kỳ ────────────────────────
+async function searchByStatus(session, username, statusType, dayRange = 1) {
+  const now = Date.now();
+
+  // Dùng giờ VN (+07:00) để tính ngày — đúng với cách BO tính
+  const todayVN   = new Date(now + 7 * 3600_000).toISOString().slice(0, 10);
+  const startVN   = new Date(now - dayRange * 86_400_000 + 7 * 3600_000).toISOString().slice(0, 10);
+  const dateFrom  = startVN;
+  const dateTo    = todayVN;
+  const starttime = new Date(dateFrom + "T00:00:00+07:00").getTime();
+  const endtime   = new Date(dateTo   + "T23:59:59.999+07:00").getTime();
+
+  const headers = {
+    "Accept":          "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin":          "https://bo.bo666st.com",
+    "Referer":         "https://bo.bo666st.com/",
+    "X-Currency":      "VND2",
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Cookie":          session.cookieHeader,
+    ...(session.authToken ? { "Authorization": session.authToken } : {}),
+  };
+
+  const res = await axios.get(`${BO_API_BASE}/deposits/search`, {
+    params: {
+      dateFrom, dateTo, starttime, endtime,
+      playerid:   username,
+      exactmatch: true,
+      statusType,
+      zoneType:   process.env.ST666_ZONE || "ASIA_HO_CHI_MINH",
+      timefilter: "deposittime",
+      sortcolumn: "deposittime",
+      sort:       "DESC",
+      limit:      20,
+      offset:     0,
+      language:   1,
+    },
+    headers,
+    timeout: 15_000,
+  });
+
+  const raw  = res.data;
+  const list = Array.isArray(raw)        ? raw
+             : Array.isArray(raw?.data)  ? raw.data
+             : Array.isArray(raw?.list)  ? raw.list
+             : Array.isArray(raw?.items) ? raw.items
+             : [];
+
+  logger.info("BO API result", { username, statusType, count: list.length });
+  return list;
+}
+
+// ── Gọi API trực tiếp với cookies từ browser session ─────────────────────────
+async function fetchDepositRemarkByUsername(username) {
+  if (!BO_USERNAME || !BO_PASSWORD) {
+    throw new Error("BO_USERNAME / BO_PASSWORD chưa được cấu hình");
+  }
+  if (!username) return null;
+
+  try {
+    const session = await getSession();
+
+    logger.info("BO API search", { username, hasToken: !!session.authToken });
+
+    // ── BƯỚC 1: Check đơn đã lên điểm chưa (DEPOSIT_RECORD trong 30 phút) ──
+    const credited = await searchByStatus(session, username, "DEPOSIT_RECORD", 1);
+    if (credited.length > 0) {
+      const latest      = credited[0]; // đã sort DESC
+      const depositTime = latest.deposittime || latest.depositTime || 0;
+      const minutesAgo  = Math.floor((Date.now() - depositTime) / 60000);
+
+      logger.info("BO DEPOSIT_RECORD check", {
+        username,
+        depositId:   latest?.depositid || null,
+        depositTime,
+        minutesAgo,
+        threshold:   30,
+        willTrigger: minutesAgo < 30,
+      });
+
+      if (minutesAgo < 30) {
+        logger.info("BO deposit already credited", {
+          username,
+          depositId:  latest?.depositid || null,
+          depositAmt: latest?.depositamt || latest?.inputdepositamt,
+          minutesAgo,
+        });
+
+        return {
+          alreadyCredited: true,
+          depositAmt:  latest?.depositamt || latest?.inputdepositamt || 0,
+          depositTime,
+        };
+      }
+    }
+
+    // ── BƯỚC 2: Tìm đơn đang chờ duyệt (DEPOSIT_AUDIT) ──
+    const list = await searchByStatus(session, username, "DEPOSIT_AUDIT", 7);
+
+    if (list.length > 0 && list[0]?.remarks) return list[0].remarks;
+
+    logger.warn("BO deposit remark not found", { username });
+    return null;
+
+  } catch (err) {
+    logger.error("BO fetchDepositRemark failed", {
+      username,
+      error:  err.message,
+      status: err.response?.status,
+      data:   JSON.stringify(err.response?.data || {}).slice(0, 200),
+    });
+
+    // Chỉ reset session nếu là lỗi xác thực thật sự.
+    // Lỗi timeout mạng → GIỮ session cũ, tránh login storm lần sau.
+    const isAuthFailure = err.message?.includes("BO login thất bại");
+    if (isAuthFailure) _session = null;
+
+    return null;
+  }
+}
+
+module.exports = { fetchDepositRemarkByUsername };

@@ -27,11 +27,12 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.set("trust proxy", 1);
-app.use(helmet({contentSecurityPolicy: false,}));;
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: "*" }));
-app.use(express.static(path.join(__dirname, "public")));  // ← thêm vào đây
+app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json({ limit: "20kb" }));
 app.use("/webhook", rateLimit({ windowMs: 60000, max: 200, standardHeaders: true, legacyHeaders: false }));
+
 // ── Logs ──────────────────────────────────────────────────────────────────────
 const recentLogs = [];
 const _origInfo  = logger.info.bind(logger);
@@ -45,14 +46,11 @@ logger.info  = (m, d) => { pushLog("info",  m, d); _origInfo(m,  d); };
 logger.error = (m, d) => { pushLog("error", m, d); _origError(m, d); };
 logger.warn  = (m, d) => { pushLog("warn",  m, d); _origWarn(m,  d); };
 
-// ── Duplicate transferContent registry (in-memory) ───────────────────────────
-const ckRegistry = new Map(); // ck_lower -> { username, time }
+// ── Duplicate transferContent registry ───────────────────────────────────────
+const ckRegistry = new Map();
 
 function ckRegister(ck, username) {
-  if (ckRegistry.size > 10000) {
-    // Xoá entry cũ nhất khi đầy
-    ckRegistry.delete(ckRegistry.keys().next().value);
-  }
+  if (ckRegistry.size > 10000) ckRegistry.delete(ckRegistry.keys().next().value);
   const key = ck.toLowerCase().trim();
   if (!ckRegistry.has(key)) {
     ckRegistry.set(key, { username: (username || "").toLowerCase().trim(), time: new Date() });
@@ -63,23 +61,41 @@ function ckCheckDuplicate(ck, username) {
   const key = ck.toLowerCase().trim();
   const existing = ckRegistry.get(key);
   if (!existing) return false;
-  // Cùng username → không phải duplicate (tra lại)
   if (existing.username === (username || "").toLowerCase().trim()) return false;
   return true;
 }
 
-// ── Urgent dedup — chặn gửi TG trùng lặp ────────────────────────────────────
+// ── Urgent dedup ──────────────────────────────────────────────────────────────
 const urgentSentSet = new Set();
 
 function urgentNorm(ck) {
   return (ck || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+// ── Telegram send với retry ───────────────────────────────────────────────────
+// Telegram API đôi khi lag → retry tối đa 2 lần trước khi throw
+async function sendTgWithRetry(fn, label, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isLast    = i === retries;
+      const isTimeout = err.code === "ECONNABORTED" || err.message?.includes("timeout");
+      const is5xx     = err.response?.status >= 500;
+
+      if (isLast || (!isTimeout && !is5xx)) {
+        throw err; // lỗi không retry được (4xx, auth fail…) → throw ngay
+      }
+
+      const delay = 2000 * (i + 1); // 2s, 4s
+      logger.warn(`${label} retry ${i + 1}/${retries}`, { error: err.message, delay });
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 // ── Routes cơ bản ─────────────────────────────────────────────────────────────
-app.get("/health", (_req, res) => res.json({
-  status: "ok",
-  timestamp: new Date().toISOString(),
-}));
+app.get("/health", (_req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
 
 app.get("/my-ip", async (_req, res) => {
   try {
@@ -92,11 +108,12 @@ app.get("/my-ip", async (_req, res) => {
 
 // ── Webhook Telegram ──────────────────────────────────────────────────────────
 app.post("/webhook/telegram", async (req, res) => {
-  try { await telegramService.processUpdate(req.body); } catch (e) { logger.error("TG error", { error: e.message }); }
+  try { await telegramService.processUpdate(req.body); }
+  catch (e) { logger.error("TG error", { error: e.message }); }
   res.json({ ok: true });
 });
 
-// ── Public API — Web tool tra cứu ─────────────────────────────────────────────
+// ── Public API — Web tool tra cứu ────────────────────────────────────────────
 const checkInvoiceLimit = rateLimit({
   windowMs: 60 * 1000, max: 20,
   message: { found: false, error: "Quá nhiều yêu cầu, vui lòng chờ 1 phút" },
@@ -118,18 +135,16 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
 
   logger.info("Web check-invoice", { username: username || "-", ck: transferContent || "-", hasImage: !!imageBuffer });
 
-  // ── Duplicate transferContent check ────────────────────────────────────────
   if (transferContent && transferContent.trim().length >= 4) {
     if (ckCheckDuplicate(transferContent, username)) {
       logger.warn("Duplicate CK detected", { ck: transferContent, by: username });
       return res.json({ found: false, duplicate: true });
     }
-    // Ghi nhận lần đầu dùng CK này
     ckRegister(transferContent, username);
   }
 
   try {
-    // ── Bước 1: Tìm trong Telegram cache ─────────────────────────────────────
+    // Bước 1: Tìm trong Telegram cache
     const result = await searchInvoiceByAll({
       username:        username        || null,
       fullname:        null,
@@ -147,57 +162,47 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
       });
     }
 
-    // ── Bước 2+3: Không có trong cache → tra BO (DEPOSIT_RECORD + DEPOSIT_AUDIT) ──
+    // Bước 2+3: Tra BO
     if (username) {
       const bo = await lookupDeposit(username);
 
-      if (bo.status === 'credited') {
-        const time = new Date(bo.depositTime)
-          .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+      if (bo.status === "credited") {
+        const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
         const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
         addBoCredit({ username, ckCode: transferContent, depositAmt: bo.depositAmt, depositTime: bo.depositTime });
         return res.json({
-          found:    true,
-          status:   "Đã lên điểm",
-          note:     `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
-          username,
-          ck:       transferContent || null,
+          found: true, status: "Đã lên điểm",
+          note: `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
+          username, ck: transferContent || null,
         });
       }
 
-      if (bo.status === 'pending') {
+      if (bo.status === "pending") {
         return res.json({
-          found:    true,
-          status:   "Đang xử lý",
-          note:     "Hóa đơn đang chờ được duyệt",
-          username,
-          ck:       transferContent || null,
+          found: true, status: "Đang xử lý",
+          note: "Hóa đơn đang chờ được duyệt",
+          username, ck: transferContent || null,
         });
       }
 
-      // Fallback: boBrowser (Playwright) nếu lookupDeposit không tìm được
+      // Fallback: boBrowser (Playwright)
       try {
         const boResult = await fetchDepositRemarkByUsername(username, transferContent);
         if (boResult && typeof boResult === "object" && boResult.alreadyCredited) {
-          const time = new Date(boResult.depositTime)
-            .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+          const time = new Date(boResult.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
           const amt  = Number(boResult.depositAmt).toLocaleString("vi-VN");
           addBoCredit({ username, ckCode: transferContent, depositAmt: boResult.depositAmt, depositTime: boResult.depositTime });
           return res.json({
-            found:    true,
-            status:   "Đã lên điểm",
-            note:     `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
-            username,
-            ck:       transferContent || null,
+            found: true, status: "Đã lên điểm",
+            note: `✅ Đơn nạp ${amt} đã được ghi nhận lúc ${time}`,
+            username, ck: transferContent || null,
           });
         }
         if (boResult && typeof boResult === "string") {
           return res.json({
-            found:    true,
-            status:   "Đang xử lý",
-            note:     "Hóa đơn đang chờ được duyệt",
-            username,
-            ck:       transferContent || null,
+            found: true, status: "Đang xử lý",
+            note: "Hóa đơn đang chờ được duyệt",
+            username, ck: transferContent || null,
           });
         }
       } catch (e) {
@@ -205,7 +210,6 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
       }
     }
 
-    // ── Bước 4: Không tìm thấy ở đâu ────────────────────────────────────────
     return res.json({ found: false });
 
   } catch (err) {
@@ -214,127 +218,151 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
   }
 });
 
-// ── Public API — Hối thúc hóa đơn qua Telegram ────────────────────────────────
+// ── Public API — Hối thúc hóa đơn qua Telegram ───────────────────────────────
 app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
-  try {
-    const token  = process.env.URGENT_TG_BOT_TOKEN;
-    const chatId = process.env.URGENT_TG_GROUP_ID;
+  const token  = process.env.URGENT_TG_BOT_TOKEN;
+  const chatId = process.env.URGENT_TG_GROUP_ID;
 
-    if (!token || !chatId) {
-      logger.error("Urgent invoice config missing", { hasToken: !!token, hasChatId: !!chatId });
-      return res.status(500).json({ ok: false, error: "Thiếu cấu hình Telegram urgent bot" });
-    }
-
-    const username        = (req.body.username || "-").trim();
-    const fullname        = (req.body.fullname || "-").trim();
-    const transferContent = (req.body.transferContent || req.body.ck || "-").trim();
-    const image           = req.file;
-
-    if (!username || username === "-" || !transferContent || transferContent === "-") {
-      return res.status(400).json({ ok: false, error: "Thiếu tài khoản hoặc mã giao dịch" });
-    }
-
-    // ── Chặn gửi TG duplicate ─────────────────────────────────────────────────
-    const ckKey = urgentNorm(transferContent);
-    if (ckKey && urgentSentSet.has(ckKey)) {
-      logger.info("Urgent duplicate suppressed", { username, ck: transferContent });
-      return res.json({ ok: true });
-    }
-    // KHÔNG add vào Set ở đây — chỉ add sau khi gửi TG thành công
-
-    // ── Tra Deposit Remark bằng Playwright BO browser ────────────────────────────
-    let orderCode = "-";
-    try {
-      const depositRemark = await fetchDepositRemarkByUsername(username, transferContent);
-
-      // Đơn đã lên điểm → trả về thẳng cho frontend, không escalate
-      if (depositRemark && typeof depositRemark === "object" && depositRemark.alreadyCredited) {
-        const time = new Date(depositRemark.depositTime)
-          .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-        const amt  = Number(depositRemark.depositAmt).toLocaleString("vi-VN");
-        logger.info("Deposit already credited, skip escalate", { username, amt, time });
-        addBoCredit({ username, ckCode: transferContent, depositAmt: depositRemark.depositAmt, depositTime: depositRemark.depositTime });
-        return res.json({
-          ok:              true,
-          alreadyCredited: true,
-          message:         `✅ Đơn nạp ${amt} của bạn đã được ghi nhận lúc ${time}. Vui lòng kiểm tra số dư tài khoản.`,
-        });
-      }
-
-      if (depositRemark) {
-        orderCode = depositRemark;
-        logger.info("BO browser deposit remark fetched", { username, orderCode });
-      } else {
-        logger.warn("BO browser deposit remark not found", { username });
-      }
-    } catch (e) {
-      logger.warn("BO browser fetch skipped", { error: e.message, username });
-    }
-
-    const caption = [
-      username,
-      fullname,
-      transferContent,
-      orderCode,
-      "Yêu cầu hối thúc hóa đơn từ khách",
-      "-",
-    ].join("\n");
-
-    let tg;
-    const cskhReplyMarkup = telegramService.buildCskhKeyboard();
-
-    if (image && image.buffer) {
-      const form = new FormData();
-      form.append("chat_id", chatId);
-      form.append("caption", caption);
-      form.append("reply_markup", JSON.stringify(cskhReplyMarkup));
-      form.append("photo", image.buffer, {
-        filename:    image.originalname || "invoice.jpg",
-        contentType: image.mimetype     || "image/jpeg",
-      });
-      tg = await axios.post(
-        `https://api.telegram.org/bot${token}/sendPhoto`,
-        form,
-        { headers: form.getHeaders(), timeout: 35000 }
-      );
-    } else {
-      tg = await axios.post(
-        `https://api.telegram.org/bot${token}/sendMessage`,
-        { chat_id: chatId, text: caption, reply_markup: cskhReplyMarkup },
-        { timeout: 25000 }
-      );
-    }
-
-    const sentMsg = tg.data?.result || {};
-    addManualInvoice({
-      messageId: sentMsg.message_id,
-      username,
-      fullname,
-      ckCode:    transferContent,
-      orderCode,
-      status:    "-",
-      note:      "Yêu cầu hối thúc hóa đơn từ khách",
-      fileId:    sentMsg.photo?.length ? sentMsg.photo[sentMsg.photo.length - 1].file_id : null,
-    });
-
-    // Chỉ đánh dấu duplicate sau khi gửi TG thành công
-    if (ckKey) urgentSentSet.add(ckKey);
-    // Xóa deposit cache để lần check tiếp theo lấy data mới từ BO
-    if (username) invalidateDepositCache(username);
-    return res.json({ ok: true, telegram: tg.data?.ok === true });
-
-  } catch (err) {
-    logger.error("Urgent invoice send failed", {
-      error: err.message,
-      tg:    err.response?.data || null,
-    });
-    return res.status(500).json({
-      ok:     false,
-      error:  "Gửi hối thúc thất bại",
-      detail: err.response?.data?.description || err.message,
-    });
+  if (!token || !chatId) {
+    logger.error("Urgent invoice config missing", { hasToken: !!token, hasChatId: !!chatId });
+    return res.status(500).json({ ok: false, error: "Thiếu cấu hình Telegram urgent bot" });
   }
+
+  const username        = (req.body.username || "-").trim();
+  const fullname        = (req.body.fullname || "-").trim();
+  const transferContent = (req.body.transferContent || req.body.ck || "-").trim();
+  const image           = req.file;
+
+  if (!username || username === "-" || !transferContent || transferContent === "-") {
+    return res.status(400).json({ ok: false, error: "Thiếu tài khoản hoặc mã giao dịch" });
+  }
+
+  const ckKey = urgentNorm(transferContent);
+  if (ckKey && urgentSentSet.has(ckKey)) {
+    logger.info("Urgent duplicate suppressed", { username, ck: transferContent });
+    return res.json({ ok: true });
+  }
+
+  // Trả 202 ngay — frontend không bị treo, BO lookup + TG gửi ở background
+  res.status(202).json({ ok: true, queued: true });
+
+  setImmediate(async () => {
+    try {
+      // ── Bước 1: lookupDeposit (API trực tiếp, nhanh, có cache 5p) ──────────
+      // Không dùng Playwright trừ khi API không trả về remark
+      let orderCode = null;
+      try {
+        const bo = await lookupDeposit(username);
+        if (bo.status === "credited") {
+          const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+          const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
+          addBoCredit({ username, ckCode: transferContent, depositAmt: bo.depositAmt, depositTime: bo.depositTime });
+          logger.info("Deposit already credited (API), skip escalate", { username, amt, time });
+          return;
+        }
+        if (bo.status === "pending" && bo.remark) {
+          orderCode = bo.remark;
+          logger.info("OrderCode from API lookup", { username, orderCode });
+        }
+      } catch (e) {
+        logger.warn("lookupDeposit failed in urgent-invoice bg", { error: e.message, username });
+      }
+
+      // ── Bước 2: Fallback Playwright nếu API không có remark ───────────────
+      if (!orderCode) {
+        try {
+          const boResult = await fetchDepositRemarkByUsername(username, transferContent);
+          if (boResult && typeof boResult === "object" && boResult.alreadyCredited) {
+            const time = new Date(boResult.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+            const amt  = Number(boResult.depositAmt).toLocaleString("vi-VN");
+            addBoCredit({ username, ckCode: transferContent, depositAmt: boResult.depositAmt, depositTime: boResult.depositTime });
+            logger.info("Deposit already credited (Playwright), skip escalate", { username, amt, time });
+            return;
+          }
+          if (typeof boResult === "string" && boResult) {
+            orderCode = boResult;
+            logger.info("BO browser deposit remark fetched", { username, orderCode });
+          } else {
+            logger.warn("BO browser deposit remark not found", { username });
+          }
+        } catch (e) {
+          logger.warn("BO browser fetch failed in bg", { error: e.message, username });
+        }
+      }
+
+      // orderCode bắt buộc — không có thì KHÔNG gửi TG thiếu data
+      if (!orderCode) {
+        logger.error("Urgent invoice aborted: orderCode not found", { username, transferContent });
+        return;
+      }
+
+      // ── Bước 3: Gửi Telegram với orderCode đầy đủ ────────────────────────
+      const caption = [
+        username, fullname, transferContent,
+        orderCode,
+        "Yêu cầu hối thúc hóa đơn từ khách",
+        "-",
+      ].join("\n");
+
+      const cskhReplyMarkup = telegramService.buildCskhKeyboard();
+      let tgResult;
+
+      if (image && image.buffer) {
+        tgResult = await sendTgWithRetry(async () => {
+          const form = new FormData();
+          form.append("chat_id", chatId);
+          form.append("caption", caption);
+          form.append("reply_markup", JSON.stringify(cskhReplyMarkup));
+          form.append("photo", image.buffer, {
+            filename:    image.originalname || "invoice.jpg",
+            contentType: image.mimetype     || "image/jpeg",
+          });
+          const r = await axios.post(
+            "https://api.telegram.org/bot" + token + "/sendPhoto",
+            form,
+            { headers: form.getHeaders(), timeout: 35_000 }
+          );
+          return r.data;
+        }, "sendPhoto");
+      } else {
+        tgResult = await sendTgWithRetry(async () => {
+          const r = await axios.post(
+            "https://api.telegram.org/bot" + token + "/sendMessage",
+            { chat_id: chatId, text: caption, reply_markup: cskhReplyMarkup },
+            { timeout: 25_000 }
+          );
+          return r.data;
+        }, "sendMessage");
+      }
+
+      const sentMsg = tgResult && tgResult.result ? tgResult.result : {};
+      addManualInvoice({
+        messageId: sentMsg.message_id,
+        username,  fullname,
+        ckCode:    transferContent,
+        orderCode,
+        status:    "-",
+        note:      "Yêu cầu hối thúc hóa đơn từ khách",
+        fileId:    sentMsg.photo && sentMsg.photo.length
+                   ? sentMsg.photo[sentMsg.photo.length - 1].file_id
+                   : null,
+      });
+
+      if (ckKey) urgentSentSet.add(ckKey);
+      if (username) invalidateDepositCache(username);
+      logger.info("Urgent invoice sent", { username, orderCode, tgOk: tgResult && tgResult.ok });
+
+    } catch (bgErr) {
+      logger.error("Urgent invoice background failed", {
+        error:  bgErr.message,
+        tg:     bgErr.response && bgErr.response.data ? bgErr.response.data : null,
+        status: bgErr.response && bgErr.response.status ? bgErr.response.status : null,
+        username,
+      });
+    }
+  });
 });
+
 
 // ── Admin API ─────────────────────────────────────────────────────────────────
 const ADMIN_KEY = process.env.ADMIN_API_KEY || "";
@@ -348,30 +376,22 @@ function adminAuth(req, res, next) {
 
 app.get("/admin/stats", adminAuth, (_req, res) => {
   res.json({
-    ok:        true,
-    cache:     telegramService.getCacheStats(),
-    uptime:    Math.floor(process.uptime()),
-    memory:    Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB",
+    ok: true, cache: telegramService.getCacheStats(),
+    uptime: Math.floor(process.uptime()),
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB",
     timestamp: new Date().toISOString(),
   });
 });
 
-app.get("/admin/logs", adminAuth, (req, res) => {
+app.get("/admin/logs",          adminAuth, (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   res.json({ ok: true, logs: recentLogs.slice(-limit) });
 });
 
-app.get("/admin/cache", adminAuth, (_req, res) => {
-  res.json({ ok: true, cache: telegramService.getCacheStats() });
-});
-
-app.get("/admin/cache/inspect", adminAuth, (_req, res) => {
-  const data = getDebugCache();
-  res.json({ ok: true, ...data });
-});
-
+app.get("/admin/cache",         adminAuth, (_req, res) => res.json({ ok: true, cache: telegramService.getCacheStats() }));
+app.get("/admin/cache/inspect", adminAuth, (_req, res) => res.json({ ok: true, ...getDebugCache() }));
 app.get("/admin/invoice-stats", adminAuth, (_req, res) => {
-  const stats = getInvoiceStats();
+  const stats     = getInvoiceStats();
   const boCredits = getBoCreditStats();
   res.json({ ok: true, ...stats, boCredits });
 });

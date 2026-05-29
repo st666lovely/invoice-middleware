@@ -18,13 +18,13 @@ try {
   chromium = require("playwright").chromium;
 }
 
-const BO_LOGIN_URL = process.env.BO_LOGIN_URL  || "https://bo.bo666st.com/login";
-const BO_API_BASE  = process.env.ST666_API_BASE || "https://boapi.bo666st.com/vh7prod-ims/api/v1";
+const BO_LOGIN_URL = process.env.BO_LOGIN_URL  || "https://bo.da77ae888.com/login";
+const BO_API_BASE  = process.env.AE888_API_BASE || "https://boapi.da77ae888.com/ae888-ims/api/v1";
 const BO_USERNAME  = process.env.BO_USERNAME;
 const BO_PASSWORD  = process.env.BO_PASSWORD;
 
 // Threshold chung — đồng bộ với st666api.js
-const CREDITED_THRESHOLD_MS = 30 * 60 * 1000;
+const CREDITED_THRESHOLD_MS = 120 * 60 * 1000; // 120 phút
 
 // ── Session cache + MUTEX ─────────────────────────────────────────────────────
 let _session      = null;
@@ -185,8 +185,8 @@ async function searchByStatus(session, username, statusType, dayRange = 1) {
   const headers = {
     "Accept":          "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Origin":          "https://bo.bo666st.com",
-    "Referer":         "https://bo.bo666st.com/",
+    "Origin":          "https://bo.da77ae888.com",
+    "Referer":         "https://bo.da77ae888.com/",
     "X-Currency":      "VND2",
     "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Cookie":          session.cookieHeader,
@@ -199,7 +199,7 @@ async function searchByStatus(session, username, statusType, dayRange = 1) {
       playerid:   username,
       exactmatch: true,
       statusType,
-      zoneType:   process.env.ST666_ZONE || "ASIA_HO_CHI_MINH",
+      zoneType:   process.env.AE888_ZONE || "ASIA_HO_CHI_MINH",
       timefilter: "deposittime",
       sortcolumn: "deposittime",
       sort:       "DESC",
@@ -222,6 +222,23 @@ async function searchByStatus(session, username, statusType, dayRange = 1) {
   return list;
 }
 
+// ── Helper: kiểm tra đơn bị huỷ/cancel ──────────────────────────────────────
+// Status codes từ BO (số nguyên) — chỉ thêm khi đã XÁC NHẬN từ raw log:
+//   3 = Approved  ← ĐÃ LÊN ĐIỂM, KHÔNG filter
+//   5 = Cancel    ← xác nhận từ raw log
+// KHÔNG đoán mò — chưa xác nhận thì không thêm vào
+const CANCELLED_STATUS_CODES = new Set([5]);
+
+function isCancelledDeposit(d) {
+  // Status là số (trường hợp thực tế của BO này)
+  if (typeof d.status === "number") {
+    return CANCELLED_STATUS_CODES.has(d.status);
+  }
+  // Fallback: status là string (phòng trường hợp API đổi format)
+  const s = (d.status || d.depositstatus || d.statusname || "").toString().toLowerCase().trim();
+  return ["cancel", "cancelled", "reject", "rejected", "failed", "fail", "void", "refund"].includes(s);
+}
+
 // ── Public ────────────────────────────────────────────────────────────────────
 async function fetchDepositRemarkByUsername(username) {
   if (!BO_USERNAME || !BO_PASSWORD) throw new Error("BO_USERNAME / BO_PASSWORD chưa được cấu hình");
@@ -231,26 +248,8 @@ async function fetchDepositRemarkByUsername(username) {
     const session = await getSession();
     logger.info("BO API search", { username, hasToken: !!session.authToken });
 
-    // BƯỚC 1: đã lên điểm chưa?
-    const credited = await searchByStatus(session, username, "DEPOSIT_RECORD", 1);
-    if (credited.length > 0) {
-      const latest      = credited[0];
-      const depositTime = latest.deposittime || latest.depositTime || 0;
-      const minutesAgo  = Math.floor((Date.now() - depositTime) / 60000);
-
-      logger.info("BO DEPOSIT_RECORD check", { username, depositId: latest?.depositid || null, minutesAgo });
-
-      if (Date.now() - depositTime < CREDITED_THRESHOLD_MS) {
-        logger.info("BO deposit already credited", { username, depositAmt: latest?.depositamt, minutesAgo });
-        return {
-          alreadyCredited: true,
-          depositAmt:  latest?.depositamt || latest?.inputdepositamt || 0,
-          depositTime,
-        };
-      }
-    }
-
-    // BƯỚC 2: đang chờ duyệt
+    // DEPOSIT_RECORD đã được lookupDeposit() (ae888api/st666api) check trước rồi.
+    // boBrowser chỉ lấy remarks từ DEPOSIT_AUDIT — không gọi BO 2 lần.
     const list = await searchByStatus(session, username, "DEPOSIT_AUDIT", 7);
     if (list.length > 0 && list[0]?.remarks) return list[0].remarks;
 
@@ -265,9 +264,18 @@ async function fetchDepositRemarkByUsername(username) {
       data:   JSON.stringify(err.response?.data || {}).slice(0, 200),
     });
     const isAuthFailure = err.message?.includes("BO login thất bại");
-    if (isAuthFailure) _session = null;
+    const is401 = err.response?.status === 401;
+    if (isAuthFailure || is401) {
+      logger.warn("BO session reset due to auth failure/401", { is401, isAuthFailure });
+      _session = null;
+    }
     return null;
   }
 }
 
-module.exports = { fetchDepositRemarkByUsername, getSession };
+function invalidateSession() {
+  _session = null;
+  logger.info("BO session invalidated (forced re-login on next call)");
+}
+
+module.exports = { fetchDepositRemarkByUsername, getSession, invalidateSession };

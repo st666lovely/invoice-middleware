@@ -8,12 +8,12 @@
 
 const axios      = require("axios");
 const logger     = require("./logger");
-const { getSession } = require("./boBrowser"); // ← dùng chung, không login 2 lần
+const { getSession, invalidateSession } = require("./boBrowser"); // ← dùng chung, không login 2 lần
 
 const BASE = process.env.ST666_API_BASE || "https://boapi.bo666st.com/vh7prod-ims/api/v1";
 
 // Threshold chung — đồng bộ với boBrowser.js
-const CREDITED_THRESHOLD_MS = 30 * 60 * 1000;
+const CREDITED_THRESHOLD_MS = 120 * 60 * 1000; // 120 phút
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function buildHeaders(session) {
@@ -96,12 +96,31 @@ function extractDepositRemark(deposit) {
       || findRemarkDeep(deposit) || null;
 }
 
+// ── Helper: kiểm tra đơn bị huỷ/cancel ──────────────────────────────────────
+// Status codes từ BO (số nguyên) — chỉ thêm khi đã XÁC NHẬN từ raw log:
+//   3 = Approved  ← ĐÃ LÊN ĐIỂM, KHÔNG filter
+//   5 = Cancel    ← xác nhận từ raw log
+// KHÔNG đoán mò — chưa xác nhận thì không thêm vào
+const CANCELLED_STATUS_CODES = new Set([5]);
+
+function isCancelledDeposit(d) {
+  // Status là số (trường hợp thực tế của BO này)
+  if (typeof d.status === "number") {
+    return CANCELLED_STATUS_CODES.has(d.status);
+  }
+  // Fallback: status là string (phòng trường hợp API đổi format)
+  const s = (d.status || d.depositstatus || d.statusname || "").toString().toLowerCase().trim();
+  return ["cancel", "cancelled", "reject", "rejected", "failed", "fail", "void", "refund"].includes(s);
+}
+
 // ── Core search ───────────────────────────────────────────────────────────────
-async function searchDepositsByStatus(username, statusType, dayRange = 1) {
+async function searchDepositsByStatus(username, statusType, dayRange = 1, _retry = false) {
   const session = await getSession(); // dùng chung session với boBrowser.js
   const { dateFrom, dateTo, starttime, endtime } = getDateParts(dayRange);
 
-  const res = await axios.get(`${BASE}/deposits/search`, {
+  let res;
+  try {
+  res = await axios.get(`${BASE}/deposits/search`, {
     params: {
       dateFrom, dateTo, starttime, endtime,
       exactmatch: true,
@@ -118,6 +137,15 @@ async function searchDepositsByStatus(username, statusType, dayRange = 1) {
     headers: buildHeaders(session),
     timeout: 15000,
   });
+
+  } catch (err) {
+    if (err.response?.status === 401 && !_retry) {
+      logger.warn("ST666 401 — invalidating session, retrying once", { username, statusType });
+      invalidateSession();
+      return searchDepositsByStatus(username, statusType, dayRange, true);
+    }
+    throw err;
+  }
 
   const list = normalizeList(res.data);
   logger.info("ST666 deposits/search", { username, statusType, dayRange, results: list.length });
@@ -151,8 +179,9 @@ async function fetchPendingRemark(username) {
   if (!username) return null;
 
   try {
-    // BƯỚC 1: đã lên điểm chưa?
-    const credited = await searchDepositsByStatus(username, "DEPOSIT_RECORD", 1);
+    // BƯỚC 1: đã lên điểm chưa? — lọc bỏ đơn Cancel/Reject
+    const creditedRaw = await searchDepositsByStatus(username, "DEPOSIT_RECORD", 1);
+    const credited    = creditedRaw.filter(d => !isCancelledDeposit(d));
     if (credited.length > 0) {
       const latest      = pickLatestDeposit(credited);
       const depositTime = getTime(latest);
@@ -209,8 +238,23 @@ async function lookupDeposit(username) {
 
   let result;
   try {
-    // BƯỚC 1: đã lên điểm?
-    const credited = await searchDepositsByStatus(username, "DEPOSIT_RECORD", 1);
+    // BƯỚC 1: đã lên điểm? — lọc bỏ đơn Cancel/Reject
+    const creditedRaw = await searchDepositsByStatus(username, "DEPOSIT_RECORD", 1);
+    if (creditedRaw.length > 0) {
+      // LOG TẠM — xem tên field status trong DEPOSIT_RECORD response
+      logger.info("ST666 DEPOSIT_RECORD raw sample", {
+        username,
+        sample: JSON.stringify(creditedRaw[0]).slice(0, 1000),
+      });
+    }
+    const credited    = creditedRaw.filter(d => !isCancelledDeposit(d));
+    const cancelledCount = creditedRaw.length - credited.length;
+    if (cancelledCount > 0) {
+      logger.info("ST666 DEPOSIT_RECORD has cancelled entries, falling back to DEPOSIT_AUDIT", {
+        username, cancelledCount,
+        cancelledStatuses: creditedRaw.filter(isCancelledDeposit).map(d => d.status),
+      });
+    }
     if (credited.length > 0) {
       const latest      = pickLatestDeposit(credited);
       const depositTime = getTime(latest);

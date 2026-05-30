@@ -734,7 +734,7 @@ function getInvoiceStats() {
   for (const [id, e] of imageCache) {
     if (!e.username) continue;
     if (e.parent_id != null) continue;
-    const merged = statusMap.get(id);
+    const latest = getLatestStatus(id);
     raw.push({
       msgId:     id,
       username:  e.username,

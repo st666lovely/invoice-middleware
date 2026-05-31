@@ -211,8 +211,10 @@ function buildT3Keyboard() {
 }
 
 function pickT3ChatId(orderCode) {
+  // Dùng paymentChannels.js thay vì env var T3_PREFIX_MAP
   const resolved = resolveChannelGroup(orderCode);
   if (resolved) return resolved;
+  // Fallback về T3_GROUP_ID nếu không match prefix nào
   return T3_GROUP_ID || null;
 }
 
@@ -360,7 +362,7 @@ function findByCK(searchCK) {
   for (const [id, entry] of imageCache) {
     if (Date.now() - entry.cached_at > CACHE_TTL) { imageCache.delete(id); continue; }
     const ck = entry.ck_code || "";
-    if (!ck) continue;
+    if (!ck) continue;  // bỏ qua entry không có CK — tránh false match
     if (ck === n || ck.includes(n) || n.includes(ck)) {
       logger.info("CK match", { id, ck, search: n });
       return id;
@@ -394,6 +396,8 @@ async function searchInvoiceByAll({ username, fullname, transferContent, imageBu
   const latest = getLatestStatus(rootId);
   const root   = imageCache.get(rootId);
 
+  // Status: ưu tiên reply mới nhất
+  // Note: ưu tiên reply mới nhất, fallback về caption gốc
   const status = latest?.status || root?.status || "Đang xử lý";
   const note   = latest?.note   || root?.note   || null;
 
@@ -403,6 +407,8 @@ async function searchInvoiceByAll({ username, fullname, transferContent, imageBu
 
 
 // ── Manual index invoice bot tự gửi ───────────────────────────────────────────
+// Bot API thường không gửi update cho chính tin nhắn bot vừa gửi.
+// Server gọi hàm này sau khi gửi hối thúc thành công để đưa hóa đơn vào cache.
 function addManualInvoice({ messageId, username, fullname, ckCode, orderCode, status, note, fileId }) {
   const msgId = Number(messageId) || Date.now();
   const entry = {
@@ -522,6 +528,7 @@ async function handleCskhNotify(cb) {
   const notifyGroupId = process.env.NOTIFY_GROUP_ID;
   if (!notifyGroupId) return answerCallbackQuery(cb.id, "Chưa cấu hình NOTIFY_GROUP_ID");
 
+  // Forward chính tin reply này sang nhóm thông báo
   await axios.post(`${TELEGRAM_API}/forwardMessage`, {
     chat_id:      notifyGroupId,
     from_chat_id: msg.chat.id,
@@ -548,6 +555,7 @@ async function handleT3Callback(cb) {
   const status     = cb.data.replace("t3:status:", "").trim();
   const defaultNote = DEFAULT_NOTES[status] || null;
 
+  // "Khác" → yêu cầu nhập ghi chú thủ công như cũ
   if (!defaultNote) {
     pendingT3.set(Number(cb.from.id), { ...link, t3MsgId, status });
     await sendTelegramMessage({
@@ -558,8 +566,10 @@ async function handleT3Callback(cb) {
     return answerCallbackQuery(cb.id, "Nhập ghi chú để gửi về CSKH");
   }
 
+  // Các trạng thái có ghi chú mặc định → gửi ngay, không cần nhập
   await answerCallbackQuery(cb.id, "✅ Đã gửi về nhóm CSKH");
 
+  // Gửi xác nhận ngắn vào nhóm T3
   await sendTelegramMessage({
     chat_id: msg.chat.id,
     text: `Đã xử lý-已處理, ${status}`,
@@ -682,7 +692,8 @@ async function warmupCache(webhookUrl) {
 }
 
 // ── BO Auto Credit Cache ──────────────────────────────────────────────────────
-const boCreditCache = new Map();
+// Lưu các đơn tự tra BO ra kết quả đã lên điểm (nguồn: DEPOSIT_RECORD)
+const boCreditCache = new Map(); // username+ck → entry
 
 function addBoCredit({ username, ckCode, depositAmt, depositTime }) {
   if (!username) return;
@@ -707,40 +718,47 @@ function getBoCreditStats() {
 
 // ── Invoice Stats ─────────────────────────────────────────────────────────────
 function getInvoiceStats() {
-  // ── BỔ SUNG: dùng getLatestStatus() thay vì build statusMap 1 cấp ──────────
-  // statusMap cũ chỉ look up direct parent→child, bỏ sót reply của reply.
-  // getLatestStatus() traverse đệ quy toàn bộ cây reply → lấy đúng status mới nhất.
-
+  // Build parentId → latest status từ textCache
+  const statusMap = new Map();
+  for (const [, e] of textCache) {
+    if (!e.parent_id || !e.status || e.status === '-') continue;
+    const cur = statusMap.get(e.parent_id);
+    const ts  = e.message_date || e.cached_at || 0;
+    if (!cur || ts > cur.ts) {
+      statusMap.set(e.parent_id, { status: e.status, note: e.note || null, ts });
+    }
+  }
+ 
   // Lấy tất cả entries có username + parent_id null (tin gốc)
   const raw = [];
   for (const [id, e] of imageCache) {
     if (!e.username) continue;
     if (e.parent_id != null) continue;
-
-    const latest = getLatestStatus(id); // ← traverse đệ quy, không bỏ sót cấp nào
+    const merged = statusMap.get(id);
     raw.push({
       msgId:     id,
       username:  e.username,
-      ck_code:   e.ck_code  || null,
-      fullname:  e.fullname || null,
-      status:    latest?.status || e.status || '-',
-      note:      latest?.note   || e.note   || null,
+      ck_code:   e.ck_code   || null,
+      fullname:  e.fullname  || null,
+      status:    merged?.status || e.status || '-',
+      note:      merged?.note   || e.note   || null,
       cached_at: e.cached_at,
     });
   }
-
+ 
   // Deduplicate: cùng username + ck_code → chỉ giữ entry mới nhất
   const dedupMap = new Map();
   for (const inv of raw) {
     const key = (inv.username || '').toLowerCase() + '|' + (inv.ck_code || '').toLowerCase();
     const existing = dedupMap.get(key);
+    // Ưu tiên entry có status thực > '-', hoặc entry mới hơn
     if (!existing) {
       dedupMap.set(key, inv);
     } else {
       const curHasStatus  = inv.status && inv.status !== '-';
       const prevHasStatus = existing.status && existing.status !== '-';
       if (curHasStatus && !prevHasStatus) {
-        dedupMap.set(key, inv);
+        dedupMap.set(key, inv); // entry mới có status thực
       } else if (curHasStatus && prevHasStatus) {
         if (inv.cached_at > existing.cached_at) dedupMap.set(key, inv);
       } else if (!prevHasStatus && inv.cached_at > existing.cached_at) {
@@ -748,24 +766,24 @@ function getInvoiceStats() {
       }
     }
   }
-
+ 
   const invoices = [...dedupMap.values()]
     .sort((a, b) => b.cached_at - a.cached_at);
-
+ 
   // Đếm theo trạng thái
   const byStatus = {};
   for (const inv of invoices) {
     const s = inv.status || '-';
     byStatus[s] = (byStatus[s] || 0) + 1;
   }
-
+ 
   // Đếm theo ngày (giờ VN +07:00)
   const byDate = {};
   for (const inv of invoices) {
     const d = new Date(inv.cached_at + 7 * 3600000).toISOString().slice(0, 10);
     byDate[d] = (byDate[d] || 0) + 1;
   }
-
+ 
   return {
     total:    invoices.length,
     byStatus,
@@ -776,8 +794,8 @@ function getInvoiceStats() {
     })),
   };
 }
-
-
+ 
+ 
 function getDebugCache() {
   const images = [...imageCache.entries()].map(([id, e]) => ({
     msgId:     id,
@@ -796,17 +814,17 @@ function getDebugCache() {
   }));
   return { images, texts, replyCount: replyIndex.size };
 }
-
+ 
 function addRuntimeStatus({ kw, full, emoji }) {
   STATUS_MAP.unshift({ kw: kw.toLowerCase(), full, emoji: emoji || "📋" });
   logger.info("Runtime status added", { kw, full });
 }
-
+ 
 // ── Exports ───────────────────────────────────────────────────────────────────
 const telegramService = {
   processUpdate, setupWebhook, warmupCache,
   getCacheStats: () => ({ images: imageCache.size, texts: textCache.size, replies: replyIndex.size, t3Links: t3Links.size }),
   buildCskhKeyboard,
 };
-
+ 
 module.exports = { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice, addBoCredit, getBoCreditStats };

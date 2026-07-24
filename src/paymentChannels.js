@@ -8,6 +8,7 @@ const PAYMENT_CHANNEL_MAP = {
   "THUYPAY": "-1003828299681",   // THUYPHATPAY
   "YOUPAYS":  "-1003761701169",
   "DZPAYVN":  "-5465223752",
+  "YOUPU":  "-1003761701169",
 };
 
 // Tập hợp tất cả Group ID của T3 (để nhận dạng tin nhắn từ nhóm T3)

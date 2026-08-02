@@ -1,502 +1,830 @@
-"use strict";
-
 /**
- * follow.js — Theo dõi hóa đơn chủ động qua Telegram
+ * Telegram Module v9 — Clean rewrite
  *
- * Mục tiêu: khi hóa đơn khách đã khai chuyển sang "Đã lên điểm", chủ động
- * nhắn Telegram cho khách — không cần khách ngồi F5 trang web kiểm tra.
+ * FORMAT CAPTION (5-6 dòng):
+ *   Dòng 1: ID (username)
+ *   Dòng 2: Họ tên
+ *   Dòng 3: CK code / Mã giao dịch
+ *   Dòng 4: Mã nội bộ (không hiển thị với khách)
+ *   Dòng 5: Ghi chú tự do (tùy chọn)
+ *   Dòng 6: Trạng thái
  *
- * Thiết kế:
- * - Module tách riêng hoàn toàn, KHÔNG đụng vào server.js/telegram.js hiện có,
- *   chỉ dùng lookupDeposit + invalidateDepositCache từ st666api.js (đọc, không sửa).
- * - Logic trạng thái bám sát đúng /api/check-invoice hiện tại: tin thẳng theo
- *   `status` mà lookupDeposit() trả về (đã tự đối chiếu DEPOSIT_AUDIT vs
- *   DEPOSIT_RECORD theo thời gian ở bên trong nó rồi) — KHÔNG thêm lớp so
- *   remark/mã CK, vì mã CK không tồn tại trong BO và khách không biết mã nội
- *   bộ để đối chiếu.
- * - Chỉ thêm 1 cơ chế: chống báo trùng, bằng cách chụp mốc `depositTime` của
- *   lần credited tại thời điểm đăng ký, và chỉ báo khi depositTime đổi khác
- *   mốc đó (tức đơn MỚI lên điểm sau khi khách bắt đầu theo dõi).
- * - Ngoài theo dõi đẩy (push, tự động), còn có tra cứu chủ động theo yêu cầu
- *   (on-demand): khách gõ bất kỳ tin nhắn nào vào bot, bot tra ngay bằng
- *   username đã nhớ (knownUsers) — không cần khai lại trên web. Nếu lúc đó
- *   đơn còn pending và sub push đã hết hạn, bot tự tái kích hoạt theo dõi.
- *
- * Dùng bot Telegram RIÊNG (FOLLOW_TG_BOT_TOKEN) — không dùng chung bot CS,
- * để tránh cướp webhook và làm hỏng bot đang chạy.
+ * FORMAT REPLY (admin cập nhật trạng thái):
+ *   1 dòng  → trạng thái
+ *   2+ dòng → dòng trước = ghi chú, dòng cuối = trạng thái
  */
 
+"use strict";
 const axios  = require("axios");
 const fs     = require("fs");
-const crypto = require("crypto");
+const path   = require("path");
+const { computeHash, downloadImage, findMatchingInvoice } = require("./imageMatch");
 const logger = require("./logger");
-const { lookupDeposit, invalidateDepositCache } = require("./st666api");
-const { addBoCredit } = require("./telegram");
+const { resolveChannelGroup, isT3Group } = require("./paymentChannels");
 
-// ── Cấu hình ──────────────────────────────────────────────────────────────────
-const BOT_TOKEN = process.env.FOLLOW_TG_BOT_TOKEN || process.env.URGENT_TG_BOT_TOKEN || null;
-const USING_FALLBACK_TOKEN = !process.env.FOLLOW_TG_BOT_TOKEN && !!process.env.URGENT_TG_BOT_TOKEN;
+// ── Config ────────────────────────────────────────────────────────────────────
+const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+const GROUP_ID     = process.env.TELEGRAM_GROUP_ID;
+const CSKH_GROUP_ID = process.env.TELEGRAM_CSKH_GROUP_ID || GROUP_ID;
+const T3_GROUP_ID   = process.env.TELEGRAM_T3_GROUP_ID || process.env.T3_GROUP_ID;
+const T3_PREFIX_MAP = (() => {
+  try { return JSON.parse(process.env.T3_PREFIX_MAP || "{}"); }
+  catch { return {}; }
+})();
+const CACHE_TTL    = 7 * 24 * 60 * 60 * 1000;
+const CACHE_FILE   = path.join(process.cwd(), "telegram_cache.json");
 
-const DB_PATH    = process.env.FOLLOW_DB_PATH   || "./follow-db.json";
-const POLL_MS    = parseInt(process.env.FOLLOW_POLL_MS)  || 30_000;
-// Thời hạn theo dõi ĐẨY (push) chủ động — mặc định 5 ngày, khớp thực tế đơn
-// có thể mất 3-5 ngày mới lên điểm. Hết hạn thì dừng đẩy tự động, nhưng
-// khách vẫn tra cứu chủ động được bất cứ lúc nào qua knownUsers bên dưới.
-const TTL_MS     = parseInt(process.env.FOLLOW_TTL_MS)   || 5 * 24 * 3600_000;
-const MAX_SUBS   = parseInt(process.env.FOLLOW_MAX_SUBS) || 500;
-// Số lượng tối đa "khách đã từng liên kết" được nhớ vĩnh viễn để tra cứu
-// chủ động (knownUsers) — bảng này KHÔNG hết hạn theo thời gian, chỉ giới
-// hạn theo dung lượng (LRU đơn giản: xoá bản ghi cũ nhất khi đầy).
-const MAX_KNOWN  = parseInt(process.env.FOLLOW_MAX_KNOWN) || 5000;
-const TOKEN_TTL_MS = 30 * 60_000; // link Start hết hạn sau 30 phút nếu chưa bấm
-const STAGGER_MS   = 300;         // giãn giữa các username trong 1 vòng poll
-const CSKH_URL     = process.env.FOLLOW_CSKH_URL || null;
-// Cooldown tra cứu chủ động — tránh khách bấm gửi dồn dập làm spam BO.
-const CHECK_COOLDOWN_MS = 10_000;
+// ── In-memory cache ───────────────────────────────────────────────────────────
+let imageCache = new Map();
+let textCache  = new Map();
+let replyIndex = new Map();
+let t3Links    = new Map(); // t3MsgId -> { rootId, csChatId, csMsgId, t3ChatId }
+let pendingT3  = new Map(); // userId -> { rootId, t3MsgId, status }
 
-let BOT_USERNAME = process.env.FOLLOW_TG_BOT_USERNAME || null;
-const api = () => `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-// ── State (in-memory + persist file) ────────────────────────────────────────
-const pendingTokens = new Map(); // token(12 ký tự) -> { username, transferContent, createdAt, expiresAt }
-const subs          = new Map(); // chatId -> subscription object (theo dõi đẩy, có hạn TTL_MS)
-// chatId -> { username, transferContent, updatedAt, lastNotifiedDepositTime }
-// Bảng nhớ vĩnh viễn để khách tra cứu chủ động bất cứ lúc nào, kể cả sau khi
-// sub push đã hết hạn hoặc đã báo credited xong.
-const knownUsers    = new Map();
-const lastCheckAt   = new Map(); // chatId -> timestamp (cooldown tra cứu chủ động)
-
-let _polling    = false;
-let _saveTimer  = null;
-let _pollTimer  = null;
-
-// ── Persistence ───────────────────────────────────────────────────────────────
-function loadDb() {
+// ── Persist ───────────────────────────────────────────────────────────────────
+function saveCache() {
   try {
-    if (!fs.existsSync(DB_PATH)) return;
-    const raw  = fs.readFileSync(DB_PATH, "utf8");
-    const data = JSON.parse(raw);
-    for (const s of data.subs || []) subs.set(s.chatId, s);
-    for (const k of data.known || []) knownUsers.set(k.chatId, k);
-    logger.info("Follow DB loaded", { subs: subs.size, known: knownUsers.size });
-  } catch (e) {
-    logger.error("Follow DB load failed", { error: e.message });
-  }
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({
+      images:  [...imageCache.entries()].map(([k, v]) => [k, { ...v, hash: undefined }]),
+      texts:   [...textCache.entries()],
+      replies: [...replyIndex.entries()],
+      t3Links: [...t3Links.entries()],
+    }), "utf8");
+  } catch (e) { logger.debug("saveCache error", { error: e.message }); }
 }
 
-function saveDbNow() {
+function loadCache() {
   try {
-    fs.writeFileSync(DB_PATH, JSON.stringify({
-      subs:  Array.from(subs.values()),
-      known: Array.from(knownUsers.entries()).map(([chatId, v]) => ({ chatId, ...v })),
-    }, null, 2));
-  } catch (e) {
-    logger.error("Follow DB save failed", { error: e.message });
+    if (!fs.existsSync(CACHE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+    if (data.images)  imageCache = new Map(data.images.map(([k, v]) => [k, { ...v, hash: null }]));
+    if (data.texts)   textCache  = new Map(data.texts);
+    if (data.replies) replyIndex = new Map(data.replies.map(([k, v]) => [Number(k), Array.isArray(v) ? v : [v]]));
+    if (data.t3Links) t3Links = new Map(data.t3Links.map(([k, v]) => [Number(k), v]));
+    logger.info("Cache loaded", { images: imageCache.size, texts: textCache.size });
+  } catch (e) { logger.warn("loadCache error", { error: e.message }); }
+}
+
+loadCache();
+setInterval(saveCache, 5 * 60 * 1000);
+
+// ── Status map ────────────────────────────────────────────────────────────────
+const STATUS_MAP = [
+  { kw: "hỗ trợ lên điểm",
+    full: "Đã nhận được, anh giúp em click vào telegram CSKH để bên em tiện trao đổi và hỗ trợ lên điểm" },
+  { kw: "chuyển sai ngân hàng",
+    full: "Chuyển sai ngân hàng nhận, anh giúp em click vào telegram CSKH để bên em tiện trao đổi biết thêm thông tin ạ" },
+  { kw: "đã lên điểm",    full: "Đã lên điểm" },
+  { kw: "chưa lên điểm",  full: "Chưa lên điểm" },
+  { kw: "đã nhận được",   full: "Đã nhận được" },
+  { kw: "chưa nhận được", full: "Chưa nhận được" },
+  { kw: "đã thanh toán",  full: "Đã thanh toán" },
+  { kw: "chờ thanh toán", full: "Chờ thanh toán" },
+  { kw: "chờ xác nhận",   full: "Chờ xác nhận thông tin" },
+  { kw: "đang xử lý",     full: "Đang xử lý" },
+  { kw: "đã xử lý",       full: "Đã xử lý" },
+  { kw: "thành công",     full: "Thành công" },
+  { kw: "thất bại",       full: "Thất bại" },
+  { kw: "đã hủy",         full: "Đã hủy" },
+  { kw: "hoàn tiền",      full: "Hóa đơn hoàn tiền" },
+  { kw: "lỗi thanh toán", full: "Lỗi thanh toán" },
+  { kw: "chưa xác định",  full: "Giao dịch chưa xác định" },
+  { kw: "đang kiểm tra",  full: "Đang kiểm tra" },
+];
+
+function normText(t) {
+  return (t || "").toLowerCase().replace(/[\/\-_.,:;!?()[\]{}]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function detectStatus(text) {
+  if (!text) return null;
+  const t = normText(text);
+  const m = STATUS_MAP.find(s => t.includes(s.kw.toLowerCase()));
+  return m ? m.full : null;
+}
+
+function normCK(ck) {
+  return (ck || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+// ── Parse caption ─────────────────────────────────────────────────────────────
+function parseCaption(text) {
+  const empty = { username: null, fullname: null, ckCode: null, orderCode: null, status: null, note: null };
+  if (!text) return empty;
+
+const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return empty;
+
+  const username = lines[0] || null;
+  const fullname = lines[1] || null;
+  const ckCode   = lines[2] ? normCK(lines[2]) : null;
+
+  let orderCode = null;
+  let status = null;
+  let note = null;
+
+  if (lines.length >= 6) {
+    orderCode = lines[3] || null;
+    const lastLine = lines[lines.length - 1];
+    status = detectStatus(lastLine) || lastLine || null;
+    const noteLines = lines.slice(4, -1);
+    note = noteLines.length ? noteLines.join(" | ") : null;
+  } else if (lines.length === 5) {
+    orderCode = "-";
+    const lastLine = lines[4];
+    status = detectStatus(lastLine) || lastLine || null;
+    note = lines[3] || null;
+  } else {
+    orderCode = lines[3] || null;
+    for (let i = lines.length - 1; i >= 2; i--) {
+      const s = detectStatus(lines[i]);
+      if (s) { status = s; break; }
+    }
   }
+
+  return { username, fullname, ckCode, orderCode, status, note };
 }
 
-function saveDbDebounced() {
-  clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(saveDbNow, 2_000);
-}
+// ── Parse reply ───────────────────────────────────────────────────────────────
+function parseReplyText(text) {
+  if (!text) return { status: null, note: null };
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return { status: null, note: null };
 
-// ── Ghi nhớ liên kết chatId <-> username (vĩnh viễn, để tra cứu chủ động) ─────
-function rememberUser(chatId, username, transferContent) {
-  if (knownUsers.size >= MAX_KNOWN && !knownUsers.has(chatId)) {
-    // LRU đơn giản: xoá bản ghi cũ nhất (Map giữ thứ tự insert)
-    knownUsers.delete(knownUsers.keys().next().value);
+  // Tìm dòng status cuối cùng từ dưới lên
+  let statusIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (detectStatus(lines[i])) { statusIdx = i; break; }
   }
-  const prev = knownUsers.get(chatId) || {};
-  knownUsers.set(chatId, {
-    username:        (username || prev.username || "").trim(),
-    transferContent: (transferContent || prev.transferContent || "").trim(),
-    updatedAt: Date.now(),
-    lastNotifiedDepositTime: prev.lastNotifiedDepositTime || null,
-  });
+
+  if (statusIdx === -1) return { status: null, note: null };
+
+  const status    = detectStatus(lines[statusIdx]);
+  const noteLines = lines.filter((_, i) => i !== statusIdx);
+  const note      = noteLines.length > 0 ? noteLines.join(" | ") : null;
+
+  return { status, note };
 }
 
-// ── Token 12 ký tự A-Za-z0-9 (hợp lệ với ?start=) ──────────────────────────────
-function genToken() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = crypto.randomBytes(12);
-  let t = "";
-  for (let i = 0; i < 12; i++) t += chars[bytes[i] % chars.length];
-  return t;
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function getLargestPhoto(photos) {
+  if (!photos?.length) return null;
+  return photos.reduce((a, b) => (a.file_size > b.file_size ? a : b));
 }
 
-function escapeHtml(s) {
-  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function cskhKeyboard() {
-  if (!CSKH_URL) return undefined;
-  return { inline_keyboard: [[{ text: "💬 Liên hệ CSKH", url: CSKH_URL }]] };
-}
-
-async function tgSend(chatId, text, extra = {}) {
+async function getFileUrl(fileId) {
   try {
-    await axios.post(`${api()}/sendMessage`, {
-      chat_id: chatId, text, parse_mode: "HTML", ...extra,
-    }, { timeout: 15_000 });
-  } catch (e) {
-    logger.error("Follow tgSend failed", { chatId, error: e.response?.data || e.message });
-  }
+    const res = await axios.get(`${TELEGRAM_API}/getFile`, { params: { file_id: fileId }, timeout: 10000 });
+    const p = res.data.result?.file_path;
+    return p ? `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${p}` : null;
+  } catch (e) { return null; }
 }
 
-// ── Public: tạo link "Theo dõi qua Telegram" cho frontend ─────────────────────
-// Gọi trong route POST /api/follow-invoice của server.js.
-// LƯU Ý CHO FRONTEND: mở window.open("about:blank") ngay trong sự kiện click,
-// rồi mới gán .location = link sau khi có response — tránh popup blocker.
-function createFollowLink(username, transferContent) {
-  if (!BOT_TOKEN)    throw new Error("FOLLOW_TG_BOT_TOKEN chưa được cấu hình");
-  if (!BOT_USERNAME) throw new Error("Bot chưa sẵn sàng (đang lấy username), thử lại sau vài giây");
 
-  const now = Date.now();
-  for (const [tok, v] of pendingTokens) if (now > v.expiresAt) pendingTokens.delete(tok);
-
-  const token = genToken();
-  pendingTokens.set(token, {
-    username:        (username || "").trim(),
-    transferContent: (transferContent || "").trim(),
-    createdAt:  now,
-    expiresAt:  now + TOKEN_TTL_MS,
-  });
-
+function buildCskhKeyboard() {
   return {
-    token,
-    link: `https://t.me/${BOT_USERNAME}?start=${token}`,
-    expiresInMinutes: TOKEN_TTL_MS / 60_000,
+    inline_keyboard: [[
+      { text: "✅ Đã lên điểm", callback_data: "cskh:done" },
+      { text: "➡️ Cho phép chuyển tiếp", callback_data: "cskh:forward" },
+    ]],
   };
 }
 
-// ── Tạo/gia hạn sub theo dõi đẩy cho 1 chatId ─────────────────────────────────
-async function armSubscription(chatId, username, transferContent) {
-  let baseline = { status: "unknown", creditedDepositTime: null };
-  try {
-    const bo = await lookupDeposit(username);
-    baseline.status = bo.status;
-    if (bo.status === "credited") baseline.creditedDepositTime = bo.depositTime;
-  } catch (e) {
-    logger.warn("Follow baseline lookup failed", { username, error: e.message });
+function buildNotifyKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: "📢 Chuyển tiếp thông báo", callback_data: "cskh:notify" },
+    ]],
+  };
+}
+
+function buildT3Keyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Đã lên điểm | 已上分",    callback_data: "t3:status:Đã lên điểm" }],
+      [{ text: "❌ Chưa nhận được | 尚未收到", callback_data: "t3:status:Chưa nhận được" }],
+      [{ text: "⚠️ Lệnh sai số tiền | 訂單金額不符",    callback_data: "t3:status:Lệnh sai số tiền" }],
+      [{ text: "🔄 Sai ngân hàng/người nhận | 銀行／收款人錯誤",  callback_data: "t3:status:Sai ngân hàng/người nhận" }],
+      [{ text: "✏️ Khác | 其他",   callback_data: "t3:status:Khác" }],
+    ],
+  };
+}
+
+function pickT3ChatId(orderCode) {
+  // Dùng paymentChannels.js thay vì env var T3_PREFIX_MAP
+  const resolved = resolveChannelGroup(orderCode);
+  if (resolved) return resolved;
+  // Fallback về T3_GROUP_ID nếu không match prefix nào
+  return T3_GROUP_ID || null;
+}
+
+function formatVNDate(ts = Date.now()) {
+  return new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(ts));
+}
+
+async function answerCallbackQuery(callbackQueryId, text = "") {
+  if (!callbackQueryId) return;
+  await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: false,
+  }, { timeout: 10000 }).catch(() => {});
+}
+
+async function sendTelegramMessage(payload) {
+  const res = await axios.post(`${TELEGRAM_API}/sendMessage`, payload, { timeout: 15000 });
+  return res.data?.result || null;
+}
+
+async function sendTelegramPhoto(payload) {
+  const res = await axios.post(`${TELEGRAM_API}/sendPhoto`, payload, { timeout: 20000 });
+  return res.data?.result || null;
+}
+
+function upsertTextStatus({ msgId, parentId, status, note }) {
+  textCache.set(Number(msgId), {
+    message_id:   Number(msgId),
+    parent_id:    parentId ? Number(parentId) : null,
+    message_date: Date.now(),
+    status,
+    note:         note || null,
+    cached_at:    Date.now(),
+  });
+  if (parentId) addReply(Number(parentId), Number(msgId));
+  saveCache();
+}
+
+function addReply(parentId, childId) {
+  const ch = replyIndex.get(parentId) || [];
+  if (!ch.includes(childId)) ch.push(childId);
+  replyIndex.set(parentId, ch);
+}
+
+// ── Lấy status mới nhất theo cached_at (thời gian) ──────────────────────────
+// Dùng cached_at thay vì msgId vì reply từ nhóm T3 có msgId thấp hơn tin gốc CSKH
+function getLatestStatus(rootId) {
+  let best = { status: null, note: null, ts: -1 };
+
+  function traverse(id) {
+    const e = imageCache.get(id) || textCache.get(id);
+    if (e?.status) {
+      const ts = e.cached_at || e.message_date || 0;
+      if (ts > best.ts) {
+        best = { status: e.status, note: e.note || null, ts };
+      }
+    }
+    for (const cid of (replyIndex.get(id) || [])) traverse(cid);
   }
 
-  subs.set(chatId, {
-    chatId,
-    username,
-    transferContent: transferContent || "",
-    baseline,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + TTL_MS,
+  traverse(rootId);
+  return best.status ? best : null;
+}
+
+// ── Index message ─────────────────────────────────────────────────────────────
+async function indexMessage(msg) {
+  if (!msg) return;
+  if (![String(GROUP_ID), String(CSKH_GROUP_ID), String(T3_GROUP_ID)].includes(String(msg.chat.id))) return;
+
+  const msgId    = msg.message_id;
+  const parentId = msg.reply_to_message?.message_id || null;
+  const msgDate  = msg.date ? msg.date * 1000 : Date.now();
+  const text     = msg.text    || "";
+  const caption  = msg.caption || "";
+
+  if (parentId) addReply(parentId, msgId);
+
+  // Tin có ảnh
+  const photo = getLargestPhoto(msg.photo);
+  if (photo) {
+    const parsed = parseCaption(caption);
+    logger.info("Caption parsed", { msgId, username: parsed.username, ck: parsed.ckCode, status: parsed.status, note: parsed.note });
+
+    try {
+      const url = await getFileUrl(photo.file_id);
+      if (url) {
+        const buf = await downloadImage(url);
+        if (buf) {
+          const hash = await computeHash(buf);
+          imageCache.set(msgId, {
+            message_id:   msgId,
+            parent_id:    parentId,
+            message_date: msgDate,
+            hash,
+            file_id:      photo.file_id,
+            username:     parsed.username,
+            fullname:     parsed.fullname,
+            ck_code:      parsed.ckCode,
+            orderCode:    parsed.orderCode,
+            status:       parsed.status,
+            note:         parsed.note,
+            cached_at:    Date.now(),
+          });
+          saveCache();
+          logger.info("Image indexed", { msgId, ck: parsed.ckCode, status: parsed.status, note: parsed.note });
+        }
+      }
+    } catch (e) { logger.error("Image index error", { msgId, error: e.message }); }
+    return;
+  }
+
+  // Tin text (reply)
+  const { status, note } = parseReplyText(text);
+  if (status || parentId) {
+    textCache.set(msgId, {
+      message_id:   msgId,
+      parent_id:    parentId,
+      message_date: msgDate,
+      status,
+      note,
+      cached_at:    Date.now(),
+    });
+    if (status) {
+      saveCache();
+      logger.info("Reply indexed", { msgId, parentId, status, note });
+    }
+  }
+}
+
+// ── Tìm theo CK ──────────────────────────────────────────────────────────────
+function findByCK(searchCK) {
+  const n = normCK(searchCK);
+  if (!n || n.length < 4) return null;
+
+  for (const [id, entry] of imageCache) {
+    if (Date.now() - entry.cached_at > CACHE_TTL) { imageCache.delete(id); continue; }
+    const ck = entry.ck_code || "";
+    if (!ck) continue;  // bỏ qua entry không có CK — tránh false match
+    if (ck === n || ck.includes(n) || n.includes(ck)) {
+      logger.info("CK match", { id, ck, search: n });
+      return id;
+    }
+  }
+  return null;
+}
+
+// ── Main search ───────────────────────────────────────────────────────────────
+async function searchInvoiceByAll({ username, fullname, transferContent, imageBuffer }) {
+  logger.info("=== SEARCH ===", { username, transferContent, cacheSize: imageCache.size });
+
+  // 1. Tìm theo CK code
+  let rootId = findByCK(transferContent);
+
+  // 2. Fallback: so khớp ảnh
+  if (!rootId && imageBuffer) {
+    const imgs = [...imageCache.values()].filter(img => img.hash);
+    logger.info("Image match attempt", { validImages: imgs.length });
+    if (imgs.length) {
+      const m = await findMatchingInvoice(imageBuffer, imgs);
+      if (m) { rootId = m.message_id; logger.info("Image match", { rootId }); }
+    }
+  }
+
+  if (!rootId) {
+    logger.info("NOT FOUND", { transferContent, cacheSize: imageCache.size });
+    return { found: false };
+  }
+
+  const latest = getLatestStatus(rootId);
+  const root   = imageCache.get(rootId);
+
+  // Status: ưu tiên reply mới nhất
+  // Note: ưu tiên reply mới nhất, fallback về caption gốc
+  const status = latest?.status || root?.status || "Đang xử lý";
+  const note   = latest?.note   || root?.note   || null;
+
+  logger.info("FOUND", { rootId, status, note });
+  return { found: true, status, note };
+}
+
+
+// ── Manual index invoice bot tự gửi ───────────────────────────────────────────
+// Bot API thường không gửi update cho chính tin nhắn bot vừa gửi.
+// Server gọi hàm này sau khi gửi hối thúc thành công để đưa hóa đơn vào cache.
+function addManualInvoice({ messageId, username, fullname, ckCode, orderCode, status, note, fileId }) {
+  const msgId = Number(messageId) || Date.now();
+  const entry = {
+    message_id:   msgId,
+    parent_id:    null,
+    message_date: Date.now(),
+    hash:         null,
+    file_id:      fileId || null,
+    username:     username || null,
+    fullname:     fullname || null,
+    ck_code:      ckCode ? normCK(ckCode) : null,
+    orderCode:    orderCode || "-",
+    status:       status || "-",
+    note:         note || null,
+    cached_at:    Date.now(),
+  };
+
+  imageCache.set(msgId, entry);
+  saveCache();
+
+  logger.info("Manual urgent invoice indexed", {
+    msgId,
+    username: entry.username,
+    ck: entry.ck_code,
+    status: entry.status,
+    note: entry.note,
   });
 
-  return baseline;
+  return entry;
 }
 
-// ── Tra cứu chủ động theo yêu cầu (khách gõ bất kỳ tin nhắn nào) ──────────────
-async function checkNow(chatId) {
-  const known = knownUsers.get(chatId);
-  if (!known || !known.username) {
-    return tgSend(chatId,
-      "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm \"Theo dõi qua Telegram\" để bắt đầu liên kết tài khoản."
-    );
+
+async function handleCskhCallback(cb) {
+  const msg = cb.message;
+  const rootId = Number(msg?.message_id);
+  const root = imageCache.get(rootId);
+  if (!root) return answerCallbackQuery(cb.id, "Không tìm thấy cache đơn này");
+
+  if (cb.data === "cskh:done") {
+    const note = "Đã lên điểm";
+    const replyText = [
+      `${formatVNDate()}`,
+      `${root.username}`,
+      `${note}`,
+    ].join("\n");
+
+    const sent = await sendTelegramMessage({
+      chat_id: msg.chat.id,
+      text: replyText,
+      reply_to_message_id: msg.message_id,
+      reply_markup: buildNotifyKeyboard(),
+    });
+
+    upsertTextStatus({
+      msgId: sent?.message_id || Date.now(),
+      parentId: rootId,
+      status: "Đã lên điểm",
+      note,
+    });
+
+    return answerCallbackQuery(cb.id, "Đã cập nhật: Đã lên điểm");
   }
 
-  const now = Date.now();
-  const lastAt = lastCheckAt.get(chatId) || 0;
-  if (now - lastAt < CHECK_COOLDOWN_MS) {
-    return; // im lặng bỏ qua nếu khách gửi dồn dập, tránh spam
-  }
-  lastCheckAt.set(chatId, now);
+  if (cb.data !== "cskh:forward") return;
 
-  try {
-    invalidateDepositCache(known.username);
-    const bo = await lookupDeposit(known.username);
+  const t3ChatId = pickT3ChatId(root.orderCode);
+  if (!t3ChatId) return answerCallbackQuery(cb.id, "Chưa cấu hình TELEGRAM_T3_GROUP_ID/T3_PREFIX_MAP");
 
-    if (bo.status === "credited") {
-      const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-      const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
-      const isNew = known.lastNotifiedDepositTime !== bo.depositTime;
+  const caption = [
+    root.username || "-",
+    root.fullname || "-",
+    root.ck_code || "-",
+    root.orderCode || "-",
+    root.note || "Yêu cầu CSKH chuyển tiếp qua T3",
+    root.status || "-",
+  ].join("\n");
 
-      await tgSend(chatId,
-        `✅ Hóa đơn của bạn đã được ghi nhận!\n\n💰 Số tiền: <b>${amt}</b>\n🕒 Lúc: ${time}`
-      );
-
-      if (isNew) {
-        try {
-          addBoCredit({
-            username:    known.username,
-            ckCode:      known.transferContent || null,
-            depositAmt:  bo.depositAmt,
-            depositTime: bo.depositTime,
-          });
-        } catch (e) {
-          logger.warn("Follow addBoCredit failed (on-demand)", { username: known.username, error: e.message });
-        }
-        logger.info("Follow on-demand notified credited", { chatId, username: known.username });
-      }
-
-      known.lastNotifiedDepositTime = bo.depositTime;
-      known.updatedAt = now;
-      subs.delete(chatId); // đã có kết quả cuối cùng → không cần đẩy tự động nữa
-      saveDbDebounced();
-      return;
-    }
-
-    if (bo.status === "pending") {
-      // Nếu sub push đã hết hạn/không còn tồn tại → tái kích hoạt (gia hạn)
-      // theo dõi đẩy ngay tại đây, coi như khách vừa "khai lại" chỉ bằng 1 tin nhắn.
-      const hadActiveSub = subs.has(chatId);
-      if (!hadActiveSub) {
-        await armSubscription(chatId, known.username, known.transferContent);
-        saveDbDebounced();
-      }
-      return tgSend(chatId,
-        `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang chờ duyệt.\n\n` +
-        (hadActiveSub
-          ? "Hệ thống vẫn đang tự động theo dõi — mình sẽ nhắn ngay khi có kết quả."
-          : "Mình đã tự động bật lại theo dõi cho đơn này — bạn không cần quay lại web, cứ chờ mình nhắn khi có kết quả, hoặc gõ bất kỳ lúc nào để kiểm tra lại.")
-      );
-    }
-
-    return tgSend(chatId,
-      `❓ Chưa tìm thấy thông tin đơn cho tài khoản <b>${escapeHtml(known.username)}</b>. Vui lòng liên hệ CSKH để được hỗ trợ.`,
-      { reply_markup: cskhKeyboard() }
-    );
-
-  } catch (e) {
-    logger.error("Follow checkNow failed", { chatId, username: known.username, error: e.message });
-    return tgSend(chatId, "⚠️ Không thể kiểm tra lúc này, vui lòng thử lại sau ít phút.");
-  }
-}
-
-// ── Webhook Telegram (POST /webhook/follow) ────────────────────────────────────
-async function handleWebhook(update) {
-  const msg = update?.message;
-  if (!msg || !msg.text) return;
-  const chatId = msg.chat.id;
-  const text   = msg.text.trim();
-
-  if (text.startsWith("/start")) {
-    const token = text.split(/\s+/)[1];
-
-    if (!token) {
-      // /start trơn (không token) — nếu đã từng liên kết trước đó, coi như
-      // một lần tra cứu chủ động; nếu chưa, hướng dẫn ra web.
-      if (knownUsers.has(chatId)) return checkNow(chatId);
-      return tgSend(chatId,
-        "👋 Chào bạn. Vui lòng bấm nút \"Theo dõi qua Telegram\" trên trang tra cứu hóa đơn để bắt đầu."
-      );
-    }
-
-    const pending = pendingTokens.get(token);
-    if (!pending) {
-      return tgSend(chatId,
-        "⚠️ Link theo dõi không hợp lệ hoặc đã hết hạn (30 phút). Vui lòng quay lại trang web và bấm \"Theo dõi qua Telegram\" lại."
-      );
-    }
-    pendingTokens.delete(token); // dùng 1 lần
-
-    if (subs.size >= MAX_SUBS && !subs.has(chatId)) {
-      return tgSend(chatId, "⚠️ Hệ thống đang quá tải theo dõi, vui lòng thử lại sau ít phút.");
-    }
-
-    // Chụp mốc gốc: nếu đơn ĐÃ credited từ trước, lưu depositTime đó lại để
-    // không báo nhầm đơn cũ — chỉ báo khi có depositTime MỚI khác mốc này.
-    const baseline = await armSubscription(chatId, pending.username, pending.transferContent);
-    rememberUser(chatId, pending.username, pending.transferContent);
-    saveDbDebounced();
-
-    logger.info("Follow subscription created", { chatId, username: pending.username });
-
-    return tgSend(chatId,
-      `✅ Đã bắt đầu theo dõi hóa đơn cho tài khoản <b>${escapeHtml(pending.username)}</b>` +
-      (pending.transferContent ? ` (mã CK: ${escapeHtml(pending.transferContent)})` : "") +
-      `.\n\nHệ thống sẽ tự động nhắn ngay khi hóa đơn được ghi nhận — bạn không cần quay lại web để kiểm tra.\n\n` +
-      `⏱ Theo dõi đẩy tự động trong ${Math.round(TTL_MS / 3600_000)} giờ. Sau đó (hoặc bất cứ lúc nào) bạn cứ nhắn lại vào đây để mình kiểm tra ngay, không cần khai lại trên web. Gõ /stop để dừng theo dõi, /status để xem trạng thái.`
-    );
-  }
-
-  if (text === "/stop") {
-    if (subs.has(chatId)) {
-      subs.delete(chatId);
-      saveDbDebounced();
-      return tgSend(chatId, "🛑 Đã dừng theo dõi tự động. Bạn vẫn có thể nhắn lại vào đây bất cứ lúc nào để mình kiểm tra đơn giúp bạn.");
-    }
-    return tgSend(chatId, "Bạn hiện không theo dõi hóa đơn nào.");
-  }
-
-  if (text === "/status" || text === "/check") {
-    if (subs.has(chatId)) {
-      const sub = subs.get(chatId);
-      const mins = Math.max(0, Math.floor((sub.expiresAt - Date.now()) / 60_000));
-      return tgSend(chatId, `Đang theo dõi tài khoản <b>${escapeHtml(sub.username)}</b>. Còn khoảng ${mins} phút theo dõi tự động.`);
-    }
-    // Không còn sub push đang chạy — coi /status như 1 lần tra cứu chủ động.
-    return checkNow(chatId);
-  }
-
-  // Bất kỳ tin nhắn nào khác — coi như khách muốn kiểm tra lại đơn cũ ngay,
-  // không cần khai lại trên web.
-  return checkNow(chatId);
-}
-
-// ── Vòng poll (mỗi FOLLOW_POLL_MS) ──────────────────────────────────────────────
-async function pollOnce() {
-  if (_polling) {
-    logger.warn("Follow poll bị bỏ qua — vòng trước chưa xong (BO chậm)");
-    return;
-  }
-  _polling = true;
-
-  try {
-    const now = Date.now();
-
-    // Xử lý hết hạn theo dõi đẩy trước — chỉ tắt đẩy tự động, KHÔNG xoá
-    // knownUsers, để khách vẫn tra cứu chủ động được bất cứ lúc nào sau này.
-    for (const [chatId, sub] of subs) {
-      if (now > sub.expiresAt) {
-        tgSend(chatId,
-          `⏱ Đã tạm dừng theo dõi tự động do quá ${Math.round(TTL_MS / 3600_000)} giờ. ` +
-          "Đơn vẫn có thể đang chờ xử lý — bạn cứ nhắn lại vào đây bất cứ lúc nào để mình kiểm tra ngay, không cần khai lại trên web. Nếu cần hỗ trợ thêm, vui lòng liên hệ CSKH.",
-          { reply_markup: cskhKeyboard() }
-        );
-        subs.delete(chatId);
-      }
-    }
-
-    // Gom theo username — 1 tài khoản chỉ gọi BO 1 lần mỗi vòng dù có nhiều sub
-    const byUsername = new Map();
-    for (const sub of subs.values()) {
-      const key = sub.username.toLowerCase();
-      if (!byUsername.has(key)) byUsername.set(key, []);
-      byUsername.get(key).push(sub);
-    }
-
-    let changed = false;
-    let i = 0;
-    for (const [username, subList] of byUsername) {
-      if (i > 0) await sleep(STAGGER_MS); // giãn cách giữa các username
-      i++;
-
-      try {
-        invalidateDepositCache(username); // cache 5 phút → phải xoá trước khi poll
-        const bo = await lookupDeposit(username);
-
-        if (bo.status !== "credited") continue;
-
-        for (const sub of subList) {
-          const alreadyNotified = sub.baseline.creditedDepositTime === bo.depositTime;
-          if (alreadyNotified) continue;
-
-          const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-          const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
-
-          tgSend(sub.chatId,
-            `✅ Hóa đơn của bạn đã được ghi nhận!\n\n💰 Số tiền: <b>${amt}</b>\n🕒 Lúc: ${time}\n\nCảm ơn bạn đã chờ đợi.`
-          );
-
-          try {
-            addBoCredit({
-              username:    sub.username,
-              ckCode:      sub.transferContent || null,
-              depositAmt:  bo.depositAmt,
-              depositTime: bo.depositTime,
-            });
-          } catch (e) {
-            logger.warn("Follow addBoCredit failed", { username: sub.username, error: e.message });
-          }
-
-          sub.baseline.creditedDepositTime = bo.depositTime;
-          sub.baseline.status = "credited";
-
-          const known = knownUsers.get(sub.chatId);
-          if (known) known.lastNotifiedDepositTime = bo.depositTime;
-
-          subs.delete(sub.chatId); // đã báo xong → dừng theo dõi đẩy luôn
-          changed = true;
-
-          logger.info("Follow notified credited", { chatId: sub.chatId, username, amt, time });
-        }
-      } catch (e) {
-        logger.error("Follow poll lookupDeposit failed", { username, error: e.message });
-      }
-    }
-
-    if (changed) saveDbDebounced();
-
-  } finally {
-    _polling = false;
-  }
-}
-
-// ── Admin: xem ai đang được theo dõi ────────────────────────────────────────────
-function getAll() {
-  return Array.from(subs.values()).map(s => ({
-    chatId:          s.chatId,
-    username:        s.username,
-    transferContent: s.transferContent,
-    baselineStatus:  s.baseline.status,
-    createdAt:       new Date(s.createdAt).toISOString(),
-    expiresAt:       new Date(s.expiresAt).toISOString(),
-  }));
-}
-
-function getAllKnown() {
-  return Array.from(knownUsers.entries()).map(([chatId, v]) => ({
-    chatId,
-    username:        v.username,
-    transferContent: v.transferContent,
-    updatedAt:       new Date(v.updatedAt).toISOString(),
-    hasActiveSub:    subs.has(chatId),
-  }));
-}
-
-// ── Khởi động (gọi trong app.listen của server.js) ───────────────────────────────
-async function start(publicUrl) {
-  if (!BOT_TOKEN) {
-    logger.warn("FOLLOW_TG_BOT_TOKEN chưa cấu hình — tính năng theo dõi Telegram bị tắt");
-    return;
-  }
-  if (USING_FALLBACK_TOKEN) {
-    logger.error(
-      "FOLLOW_TG_BOT_TOKEN chưa set — đang fallback dùng chung URGENT_TG_BOT_TOKEN. " +
-      "Việc này sẽ CƯỚP webhook của bot CS hiện tại và làm hỏng bot đang chạy. " +
-      "Vui lòng tạo bot riêng qua @BotFather rồi set FOLLOW_TG_BOT_TOKEN."
-    );
-  }
-
-  loadDb();
-
-  if (!BOT_USERNAME) {
-    try {
-      const r = await axios.get(`${api()}/getMe`, { timeout: 10_000 });
-      BOT_USERNAME = r.data?.result?.username || null;
-      logger.info("Follow bot username resolved", { username: BOT_USERNAME });
-    } catch (e) {
-      logger.error("Follow getMe failed", { error: e.response?.data || e.message });
-    }
-  }
-
-  if (publicUrl) {
-    try {
-      await axios.post(`${api()}/setWebhook`, {
-        url: `${publicUrl.replace(/\/$/, "")}/webhook/follow`,
-      }, { timeout: 10_000 });
-      logger.info("Follow webhook set", { url: `${publicUrl}/webhook/follow` });
-    } catch (e) {
-      logger.error("Follow setWebhook failed", { error: e.response?.data || e.message });
-    }
+  let sent;
+  if (root.file_id) {
+    sent = await sendTelegramPhoto({
+      chat_id: t3ChatId,
+      photo: root.file_id,
+      caption,
+      reply_markup: buildT3Keyboard(),
+    });
   } else {
-    logger.warn("PUBLIC_URL chưa set — bỏ qua setWebhook cho follow bot");
+    sent = await sendTelegramMessage({
+      chat_id: t3ChatId,
+      text: caption,
+      reply_markup: buildT3Keyboard(),
+    });
   }
 
-  _pollTimer = setInterval(() => {
-    pollOnce().catch(e => logger.error("Follow pollOnce crashed", { error: e.message }));
-  }, POLL_MS);
+  if (sent?.message_id) {
+    t3Links.set(Number(sent.message_id), {
+      rootId,
+      csChatId: msg.chat.id,
+      csMsgId: msg.message_id,
+      t3ChatId,
+    });
+    addReply(rootId, Number(sent.message_id));
+    imageCache.set(Number(sent.message_id), {
+      ...root,
+      message_id: Number(sent.message_id),
+      parent_id: rootId,
+      message_date: Date.now(),
+      cached_at: Date.now(),
+    });
+    saveCache();
+  }
 
-  logger.info("Follow poll loop started", { intervalMs: POLL_MS, ttlHours: TTL_MS / 3600_000 });
+  return answerCallbackQuery(cb.id, "Đã chuyển tiếp qua T3");
 }
 
-module.exports = { start, createFollowLink, handleWebhook, getAll, getAllKnown };
+async function handleCskhNotify(cb) {
+  const msg = cb.message;
+  const notifyGroupId = process.env.NOTIFY_GROUP_ID;
+  if (!notifyGroupId) return answerCallbackQuery(cb.id, "Chưa cấu hình NOTIFY_GROUP_ID");
+
+  // Forward chính tin reply này sang nhóm thông báo
+  await axios.post(`${TELEGRAM_API}/forwardMessage`, {
+    chat_id:      notifyGroupId,
+    from_chat_id: msg.chat.id,
+    message_id:   msg.message_id,
+  });
+
+  return answerCallbackQuery(cb.id, "✅ Đã chuyển tiếp thông báo");
+}
+
+// Ghi chú mặc định cho từng trạng thái — chỉ "Khác" mới cần nhập thủ công
+const DEFAULT_NOTES = {
+  "Đã lên điểm":    "Thanh toán đã cập nhật vào tài khoản, quý khách vui lòng kiểm tra số dư. Xin cảm ơn",
+  "Chưa nhận được": "Thanh toán chưa nhận được, tiếp tục đối soát và kiểm tra đến khi có thông báo mới",
+  "Lệnh sai số tiền":    "Số tiền không khớp với lệnh nạp, liên hệ CSKH để được hướng dẫn hỗ trợ thao tác mới",
+  "Sai ngân hàng/người nhận":  "Ngân hàng/người nhận trên hóa đơn không thuộc ST666, khách hàng cần kiểm tra lại thông tin hoặc liên hệ CSKH để được hỗ trợ",
+};
+
+async function handleT3Callback(cb) {
+  const msg    = cb.message;
+  const t3MsgId = Number(msg?.message_id);
+  const link   = t3Links.get(t3MsgId);
+  if (!link) return answerCallbackQuery(cb.id, "Không tìm thấy liên kết đơn CSKH");
+
+  const status     = cb.data.replace("t3:status:", "").trim();
+  const defaultNote = DEFAULT_NOTES[status] || null;
+
+  // "Khác" → yêu cầu nhập ghi chú thủ công như cũ
+  if (!defaultNote) {
+    pendingT3.set(Number(cb.from.id), { ...link, t3MsgId, status });
+    await sendTelegramMessage({
+      chat_id: msg.chat.id,
+      text: "Vui lòng nhập ghi chú | 請輸入備註:",
+      reply_to_message_id: t3MsgId,
+    });
+    return answerCallbackQuery(cb.id, "Nhập ghi chú để gửi về CSKH");
+  }
+
+  // Các trạng thái có ghi chú mặc định → gửi ngay, không cần nhập
+  await answerCallbackQuery(cb.id, "✅ Đã gửi về nhóm CSKH");
+
+  // Gửi xác nhận ngắn vào nhóm T3
+  await sendTelegramMessage({
+    chat_id: msg.chat.id,
+    text: `Đã xử lý-已處理, ${status}`,
+    reply_to_message_id: t3MsgId,
+  });
+
+  await processT3Reply({ link, t3MsgId, status, note: defaultNote, chatId: msg.chat.id });
+}
+
+// ── Hàm chung xử lý relay về CSKH ───────────────────────────────────────────
+async function processT3Reply({ link, t3MsgId, status, note, chatId, msgIdForCache }) {
+  const rootId    = link.rootId;
+  const csChatId  = link.csChatId;
+  const csMsgId   = link.csMsgId;
+
+  if (msgIdForCache) {
+    upsertTextStatus({ msgId: msgIdForCache, parentId: rootId, status, note });
+  }
+
+  const root       = imageCache.get(Number(rootId));
+  const username   = root?.username || "-";
+  const datetimeVN = formatVNDate(Date.now());
+
+  const replyText = [datetimeVN, username, note, status].filter(Boolean).join("\n");
+
+  const relayMsg = await sendTelegramMessage({
+    chat_id: csChatId,
+    text: replyText,
+    reply_to_message_id: csMsgId,
+    reply_markup: buildNotifyKeyboard(),
+  });
+
+  if (relayMsg?.message_id) {
+    const relayMsgId = Number(relayMsg.message_id);
+    textCache.set(relayMsgId, {
+      message_id: relayMsgId, parent_id: Number(rootId),
+      message_date: Date.now(), status, note: note || null, cached_at: Date.now(),
+    });
+    addReply(Number(rootId), relayMsgId);
+    saveCache();
+    logger.info("Relay indexed", { relayMsgId, rootId, status });
+  }
+}
+
+async function handleT3Reply(msg) {
+  const pending = pendingT3.get(Number(msg.from?.id));
+  if (!pending) return false;
+
+  const note = (msg.text || msg.caption || "").trim();
+  if (!note) return false;
+
+  pendingT3.delete(Number(msg.from.id));
+
+  await processT3Reply({
+    link:         { rootId: pending.rootId, csChatId: pending.csChatId, csMsgId: pending.csMsgId },
+    t3MsgId:      pending.t3MsgId,
+    status:       pending.status,
+    note,
+    chatId:       msg.chat.id,
+    msgIdForCache: msg.message_id,
+  });
+
+  return true;
+}
+
+async function handleCallbackQuery(cb) {
+  if (!cb?.data) return;
+  if (cb.data === "cskh:notify") return handleCskhNotify(cb);
+  if (cb.data.startsWith("cskh:")) return handleCskhCallback(cb);
+  if (cb.data.startsWith("t3:status:")) return handleT3Callback(cb);
+}
+
+// ── Webhook / Warmup ──────────────────────────────────────────────────────────
+async function processUpdate(update) {
+  if (update.callback_query) await handleCallbackQuery(update.callback_query);
+  const msg = update.message || update.channel_post;
+  if (msg) {
+    const handledT3 = await handleT3Reply(msg);
+    if (!handledT3) await indexMessage(msg);
+  }
+}
+
+async function setupWebhook(webhookUrl) {
+  const res = await axios.post(`${TELEGRAM_API}/setWebhook`, {
+    url: `${webhookUrl}/webhook/telegram`,
+    allowed_updates: ["message", "callback_query"],
+    drop_pending_updates: false,
+  });
+  logger.info("Webhook set", { ok: res.data.ok });
+}
+
+async function warmupCache(webhookUrl) {
+  try {
+    logger.info("Warming up cache...");
+    await axios.post(`${TELEGRAM_API}/deleteWebhook`, { drop_pending_updates: false });
+    logger.info("Webhook deleted temporarily");
+    await new Promise(r => setTimeout(r, 1000));
+
+    const res = await axios.get(`${TELEGRAM_API}/getUpdates`, {
+      params: { limit: 200, timeout: 10, allowed_updates: ["message", "callback_query"] },
+      timeout: 20000,
+    });
+
+    const updates = [...(res.data.result || [])].sort(
+      (a, b) => (a.message?.date || 0) - (b.message?.date || 0)
+    );
+
+    let indexed = 0;
+    for (const u of updates) {
+      if (u.message) { await indexMessage(u.message); indexed++; }
+    }
+    logger.info(`Warmup: fetched ${updates.length} msgs, indexed ${indexed}, images:${imageCache.size}`);
+
+    await setupWebhook(webhookUrl);
+    logger.info("Webhook re-activated after warmup");
+  } catch (e) {
+    logger.error("Warmup error", { error: e.message });
+    try { await setupWebhook(webhookUrl); } catch (_) {}
+  }
+}
+
+// ── BO Auto Credit Cache ──────────────────────────────────────────────────────
+// Lưu các đơn tự tra BO ra kết quả đã lên điểm (nguồn: DEPOSIT_RECORD)
+const boCreditCache = new Map(); // username+ck → entry
+
+function addBoCredit({ username, ckCode, depositAmt, depositTime }) {
+  if (!username) return;
+  const key = (username + '|' + (ckCode || '')).toLowerCase();
+  boCreditCache.set(key, {
+    username,
+    ck_code:     ckCode   || null,
+    depositAmt:  depositAmt  || 0,
+    depositTime: depositTime || Date.now(),
+    cached_at:   Date.now(),
+    source:      'bo',
+    status:      'Đã lên điểm',
+  });
+  logger.info("BO credit recorded", { username, ckCode, depositAmt });
+}
+
+function getBoCreditStats() {
+  const list = [...boCreditCache.values()]
+    .sort((a, b) => b.cached_at - a.cached_at);
+  return { total: list.length, list };
+}
+
+// ── Invoice Stats ─────────────────────────────────────────────────────────────
+function getInvoiceStats() {
+  // Build parentId → latest status từ textCache
+  const statusMap = new Map();
+  for (const [, e] of textCache) {
+    if (!e.parent_id || !e.status || e.status === '-') continue;
+    const cur = statusMap.get(e.parent_id);
+    const ts  = e.message_date || e.cached_at || 0;
+    if (!cur || ts > cur.ts) {
+      statusMap.set(e.parent_id, { status: e.status, note: e.note || null, ts });
+    }
+  }
+ 
+  // Lấy tất cả entries có username + parent_id null (tin gốc)
+  const raw = [];
+  for (const [id, e] of imageCache) {
+    if (!e.username) continue;
+    if (e.parent_id != null) continue;
+    const merged = statusMap.get(id);
+    raw.push({
+      msgId:     id,
+      username:  e.username,
+      ck_code:   e.ck_code   || null,
+      fullname:  e.fullname  || null,
+      status:    merged?.status || e.status || '-',
+      note:      merged?.note   || e.note   || null,
+      cached_at: e.cached_at,
+    });
+  }
+ 
+  // Deduplicate: cùng username + ck_code → chỉ giữ entry mới nhất
+  const dedupMap = new Map();
+  for (const inv of raw) {
+    const key = (inv.username || '').toLowerCase() + '|' + (inv.ck_code || '').toLowerCase();
+    const existing = dedupMap.get(key);
+    // Ưu tiên entry có status thực > '-', hoặc entry mới hơn
+    if (!existing) {
+      dedupMap.set(key, inv);
+    } else {
+      const curHasStatus  = inv.status && inv.status !== '-';
+      const prevHasStatus = existing.status && existing.status !== '-';
+      if (curHasStatus && !prevHasStatus) {
+        dedupMap.set(key, inv); // entry mới có status thực
+      } else if (curHasStatus && prevHasStatus) {
+        if (inv.cached_at > existing.cached_at) dedupMap.set(key, inv);
+      } else if (!prevHasStatus && inv.cached_at > existing.cached_at) {
+        dedupMap.set(key, inv);
+      }
+    }
+  }
+ 
+  const invoices = [...dedupMap.values()]
+    .sort((a, b) => b.cached_at - a.cached_at);
+ 
+  // Đếm theo trạng thái
+  const byStatus = {};
+  for (const inv of invoices) {
+    const s = inv.status || '-';
+    byStatus[s] = (byStatus[s] || 0) + 1;
+  }
+ 
+  // Đếm theo ngày (giờ VN +07:00)
+  const byDate = {};
+  for (const inv of invoices) {
+    const d = new Date(inv.cached_at + 7 * 3600000).toISOString().slice(0, 10);
+    byDate[d] = (byDate[d] || 0) + 1;
+  }
+ 
+  return {
+    total:    invoices.length,
+    byStatus,
+    byDate,
+    invoices: invoices.map(i => ({
+      ...i,
+      cached_at: new Date(i.cached_at).toISOString(),
+    })),
+  };
+}
+ 
+ 
+function getDebugCache() {
+  const images = [...imageCache.entries()].map(([id, e]) => ({
+    msgId:     id,
+    username:  e.username || null,
+    ck_code:   e.ck_code  || null,
+    status:    e.status   || null,
+    note:      e.note     || null,
+    hasHash:   !!e.hash,
+    cached_at: new Date(e.cached_at).toISOString(),
+  }));
+  const texts = [...textCache.entries()].map(([id, e]) => ({
+    msgId:  id,
+    parent: e.parent_id,
+    status: e.status,
+    note:   e.note || null,
+  }));
+  return { images, texts, replyCount: replyIndex.size };
+}
+ 
+function addRuntimeStatus({ kw, full, emoji }) {
+  STATUS_MAP.unshift({ kw: kw.toLowerCase(), full, emoji: emoji || "📋" });
+  logger.info("Runtime status added", { kw, full });
+}
+ 
+// ── Exports ───────────────────────────────────────────────────────────────────
+const telegramService = {
+  processUpdate, setupWebhook, warmupCache,
+  getCacheStats: () => ({ images: imageCache.size, texts: textCache.size, replies: replyIndex.size, t3Links: t3Links.size }),
+  buildCskhKeyboard,
+};
+ 
+module.exports = { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice, addBoCredit, getBoCreditStats };

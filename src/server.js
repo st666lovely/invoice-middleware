@@ -32,7 +32,6 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: "*" }));
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json({ limit: "20kb" }));
-app.use(express.urlencoded({ extended: true, limit: "20kb" }));
 app.use("/webhook", rateLimit({ windowMs: 60000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
@@ -115,9 +114,10 @@ app.post("/webhook/telegram", async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Webhook Telegram — bot theo dõi hóa đơn ──────────────────────────────────
 app.post("/webhook/follow", async (req, res) => {
   try { await follow.handleWebhook(req.body); }
-  catch (e) { logger.error("Follow webhook error", { error: e.message }); }
+  catch (e) { logger.error("Follow TG error", { error: e.message }); }
   res.json({ ok: true });
 });
 
@@ -226,27 +226,6 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
   }
 });
 
-// ── Public API — Theo dõi hóa đơn qua Telegram ───────────────────────────────
-const followInvoiceLimit = rateLimit({
-  windowMs: 60 * 1000, max: 10,
-  message: { ok: false, error: "Quá nhiều yêu cầu, vui lòng chờ 1 phút" },
-  standardHeaders: true, legacyHeaders: false,
-});
-
-app.post("/api/follow-invoice", followInvoiceLimit, (req, res) => {
-  const { username, transferContent } = req.body || {};
-  if (!username) {
-    return res.status(400).json({ ok: false, error: "Thiếu tài khoản" });
-  }
-  try {
-    const { link, expiresInMinutes } = follow.createFollowLink(username, transferContent);
-    res.json({ ok: true, link, expiresInMinutes });
-  } catch (e) {
-    logger.error("Follow-invoice create link failed", { error: e.message, username });
-    res.status(503).json({ ok: false, error: e.message });
-  }
-});
-
 // ── Public API — Hối thúc hóa đơn qua Telegram ───────────────────────────────
 app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
   const token  = process.env.URGENT_TG_BOT_TOKEN;
@@ -261,6 +240,9 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
   const fullname        = (req.body.fullname || "-").trim();
   const transferContent = (req.body.transferContent || req.body.ck || "-").trim();
   const image           = req.file;
+  // Token theo dõi do /api/follow-invoice cấp ngay trước đó — dùng để gắn
+  // chatId của khách vào đúng tin hối thúc này.
+  const followToken     = (req.body.followToken || "").trim() || null;
 
   if (!username || username === "-" || !transferContent || transferContent === "-") {
     return res.status(400).json({ ok: false, error: "Thiếu tài khoản hoặc mã giao dịch" });
@@ -287,6 +269,8 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
           const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
           addBoCredit({ username, ckCode: transferContent, depositAmt: bo.depositAmt, depositTime: bo.depositTime });
           logger.info("Deposit already credited (API), skip escalate", { username, amt, time });
+          // Không gửi nhóm CS -> báo thẳng khách qua bot theo dõi, huỷ token
+          follow.resolveAlreadyCredited(followToken, bo.depositAmt, bo.depositTime);
           return;
         }
         if (bo.status === "pending" && bo.remark) {
@@ -306,6 +290,7 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
             const amt  = Number(boResult.depositAmt).toLocaleString("vi-VN");
             addBoCredit({ username, ckCode: transferContent, depositAmt: boResult.depositAmt, depositTime: boResult.depositTime });
             logger.info("Deposit already credited (Playwright), skip escalate", { username, amt, time });
+            follow.resolveAlreadyCredited(followToken, boResult.depositAmt, boResult.depositTime);
             return;
           }
           if (typeof boResult === "string" && boResult) {
@@ -365,6 +350,13 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
       }
 
       const sentMsg = tgResult && tgResult.result ? tgResult.result : {};
+      const fileId  = sentMsg.photo && sentMsg.photo.length
+                      ? sentMsg.photo[sentMsg.photo.length - 1].file_id
+                      : null;
+
+      // Khách đã bấm Start xong trước khi tới đây thì gắn luôn chatId
+      const followChatId = follow.getChatIdForToken(followToken);
+
       addManualInvoice({
         messageId: sentMsg.message_id,
         username,  fullname,
@@ -372,10 +364,23 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
         orderCode,
         status:    "-",
         note:      "Yêu cầu hối thúc hóa đơn từ khách",
-        fileId:    sentMsg.photo && sentMsg.photo.length
-                   ? sentMsg.photo[sentMsg.photo.length - 1].file_id
-                   : null,
+        fileId,
+        followChatId,
       });
+
+      // Ghi lại tin gốc vào token. Nếu khách bấm Start sau, follow.js sẽ tự
+      // gắn chatId vào đúng tin này.
+      if (followToken) {
+        follow.attachUrgentRoot(followToken, {
+          messageId: sentMsg.message_id,
+          username, fullname,
+          ckCode:    transferContent,
+          orderCode,
+          status:    "-",
+          note:      "Yêu cầu hối thúc hóa đơn từ khách",
+          fileId,
+        });
+      }
 
       if (ckKey) urgentSentSet.add(ckKey);
       if (username) invalidateDepositCache(username);
@@ -390,6 +395,30 @@ app.post("/api/urgent-invoice", upload.single("image"), async (req, res) => {
       });
     }
   });
+});
+
+
+// ── Public API — Theo dõi hóa đơn qua Telegram ───────────────────────────────
+const followLimit = rateLimit({
+  windowMs: 60 * 1000, max: 10,
+  message: { ok: false, error: "Quá nhiều yêu cầu, vui lòng chờ 1 phút" },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+app.post("/api/follow-invoice", followLimit, (req, res) => {
+  const username        = ((req.body && req.body.username) || "").trim();
+  const transferContent = ((req.body && (req.body.transferContent || req.body.ck)) || "").trim();
+
+  if (!username) return res.status(400).json({ ok: false, error: "Thiếu tên đăng nhập" });
+
+  try {
+    const { token, link, expiresInMinutes } = follow.createFollowLink(username, transferContent);
+    logger.info("Follow link created", { username, ck: transferContent || "-", token });
+    res.json({ ok: true, token, link, expiresInMinutes });
+  } catch (e) {
+    logger.error("Follow link failed", { error: e.message, username });
+    res.status(503).json({ ok: false, error: e.message });
+  }
 });
 
 
@@ -425,14 +454,12 @@ app.get("/admin/invoice-stats", adminAuth, (_req, res) => {
   res.json({ ok: true, ...stats, boCredits });
 });
 
+app.get("/admin/follow", adminAuth, (_req, res) => res.json({ ok: true, follows: follow.getAll() }));
+
 app.post("/admin/cache/warmup", adminAuth, async (req, res) => {
   res.json({ ok: true, message: "Đang warmup cache..." });
   try { await telegramService.warmupCache(process.env.PUBLIC_URL); }
   catch (e) { logger.error("Manual warmup failed", { error: e.message }); }
-});
-
-app.get("/admin/follow", adminAuth, (_req, res) => {
-  res.json({ ok: true, subs: follow.getAll(), known: follow.getAllKnown() });
 });
 
 app.post("/admin/status/add", adminAuth, (req, res) => {
@@ -452,6 +479,9 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, async () => {
   logger.info(`Server running on port ${PORT}`);
   const PUBLIC_URL = process.env.PUBLIC_URL;
+
+  follow.start(PUBLIC_URL).catch(e => logger.error("Follow start failed", { error: e.message }));
+
   if (PUBLIC_URL) {
     setTimeout(() => {
       telegramService.warmupCache(PUBLIC_URL)
@@ -461,9 +491,6 @@ app.listen(PORT, async () => {
   } else {
     logger.warn("PUBLIC_URL not set, skipping cache warmup");
   }
-
-  follow.start(PUBLIC_URL)
-    .catch(e => logger.error("Follow start failed", { error: e.message }));
 });
 
 module.exports = app;

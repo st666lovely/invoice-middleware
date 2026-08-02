@@ -1,57 +1,55 @@
 "use strict";
 
 /**
- * follow.js — Theo dõi hóa đơn chủ động qua Telegram
+ * follow.js — Theo dõi hóa đơn chủ động qua Telegram (v2)
  *
- * Mục tiêu: khi hóa đơn khách đã khai chuyển sang "Đã lên điểm", chủ động
- * nhắn Telegram cho khách — không cần khách ngồi F5 trang web kiểm tra.
+ * Thiết kế mới (thay cho polling BO 30s):
+ * - Khách bấm "Theo dõi qua Telegram" trên web → mở Telegram → bấm Start.
+ * - Ngay khi Start thành công: gửi 1 tin nhắn format chuẩn (giống
+ *   addManualInvoice/hối thúc: username / họ tên / mã CK / mã nội bộ / ghi
+ *   chú / trạng thái) vào nhóm CS nội bộ (dùng chung URGENT_TG_BOT_TOKEN/
+ *   URGENT_TG_GROUP_ID — đúng bot/nhóm mà luồng "hối thúc" đang dùng), đồng
+ *   thời gắn liền chatId của khách vào entry đó trong cache của telegram.js
+ *   (trường followChatId trên imageCache — cùng tư duy với t3Links).
+ * - CS xử lý y như luồng hối thúc hiện tại (bấm nút ✅/❌, hoặc chuyển T3).
+ * - Ngay tại 2 điểm telegram.js chốt trạng thái cuối (handleCskhCallback
+ *   nhánh "cskh:done", và processT3Reply) — telegram.js tự bắn thẳng kết
+ *   quả về DM khách qua sendStatusToCustomer() ở dưới, không cần follow.js
+ *   chủ động hỏi lại.
+ * - Khách nhắn lại bất cứ lúc nào → tra thẳng trạng thái CS đã chốt gần nhất
+ *   (getInvoiceStatusByMsgId của telegram.js) — không còn hỏi BO.
  *
- * Thiết kế:
- * - Module tách riêng hoàn toàn, KHÔNG đụng vào server.js/telegram.js hiện có,
- *   chỉ dùng lookupDeposit + invalidateDepositCache từ st666api.js (đọc, không sửa).
- * - Logic trạng thái bám sát đúng /api/check-invoice hiện tại: tin thẳng theo
- *   `status` mà lookupDeposit() trả về (đã tự đối chiếu DEPOSIT_AUDIT vs
- *   DEPOSIT_RECORD theo thời gian ở bên trong nó rồi) — KHÔNG thêm lớp so
- *   remark/mã CK, vì mã CK không tồn tại trong BO và khách không biết mã nội
- *   bộ để đối chiếu.
- * - Chỉ thêm 1 cơ chế: chống báo trùng, bằng cách chụp mốc `depositTime` của
- *   lần credited tại thời điểm đăng ký, và chỉ báo khi depositTime đổi khác
- *   mốc đó (tức đơn MỚI lên điểm sau khi khách bắt đầu theo dõi).
- * - Ngoài theo dõi đẩy (push, tự động), còn có tra cứu chủ động theo yêu cầu
- *   (on-demand): khách gõ bất kỳ tin nhắn nào vào bot, bot tra ngay bằng
- *   username đã nhớ (knownUsers) — không cần khai lại trên web. Nếu lúc đó
- *   đơn còn pending và sub push đã hết hạn, bot tự tái kích hoạt theo dõi.
+ * Đã BỎ HOÀN TOÀN: poll 30s, TTL theo dõi đẩy, lookupDeposit/
+ * invalidateDepositCache — không cần job nền, không cần đoán/khớp dữ liệu,
+ * vì liên kết đã có sẵn ngay từ lúc tạo.
  *
- * Dùng bot Telegram RIÊNG (FOLLOW_TG_BOT_TOKEN) — không dùng chung bot CS,
- * để tránh cướp webhook và làm hỏng bot đang chạy.
+ * Dùng bot Telegram RIÊNG (FOLLOW_TG_BOT_TOKEN) cho phần DM khách — không
+ * dùng chung bot CS, để tránh cướp webhook và làm hỏng bot đang chạy. Tin
+ * gửi vào nhóm CS thì dùng chung URGENT_TG_BOT_TOKEN/URGENT_TG_GROUP_ID như
+ * luồng hối thúc, theo đúng yêu cầu không tạo thêm biến môi trường mới.
  */
 
 const axios  = require("axios");
 const fs     = require("fs");
 const crypto = require("crypto");
 const logger = require("./logger");
-const { lookupDeposit, invalidateDepositCache } = require("./st666api");
-const { addBoCredit } = require("./telegram");
+// Require ở đầu file là AN TOÀN theo chiều này: telegram.js không require
+// follow.js ở đầu file của nó (chỉ require trễ bên trong hàm
+// notifyFollowCustomer lúc gọi), nên không có circular require lúc load.
+const { addManualInvoice, getInvoiceStatusByMsgId, telegramService } = require("./telegram");
 
 // ── Cấu hình ──────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.FOLLOW_TG_BOT_TOKEN || process.env.URGENT_TG_BOT_TOKEN || null;
 const USING_FALLBACK_TOKEN = !process.env.FOLLOW_TG_BOT_TOKEN && !!process.env.URGENT_TG_BOT_TOKEN;
 
 const DB_PATH    = process.env.FOLLOW_DB_PATH   || "./follow-db.json";
-const POLL_MS    = parseInt(process.env.FOLLOW_POLL_MS)  || 30_000;
-// Thời hạn theo dõi ĐẨY (push) chủ động — mặc định 5 ngày, khớp thực tế đơn
-// có thể mất 3-5 ngày mới lên điểm. Hết hạn thì dừng đẩy tự động, nhưng
-// khách vẫn tra cứu chủ động được bất cứ lúc nào qua knownUsers bên dưới.
-const TTL_MS     = parseInt(process.env.FOLLOW_TTL_MS)   || 5 * 24 * 3600_000;
-const MAX_SUBS   = parseInt(process.env.FOLLOW_MAX_SUBS) || 500;
 // Số lượng tối đa "khách đã từng liên kết" được nhớ vĩnh viễn để tra cứu
 // chủ động (knownUsers) — bảng này KHÔNG hết hạn theo thời gian, chỉ giới
 // hạn theo dung lượng (LRU đơn giản: xoá bản ghi cũ nhất khi đầy).
 const MAX_KNOWN  = parseInt(process.env.FOLLOW_MAX_KNOWN) || 5000;
 const TOKEN_TTL_MS = 30 * 60_000; // link Start hết hạn sau 30 phút nếu chưa bấm
-const STAGGER_MS   = 300;         // giãn giữa các username trong 1 vòng poll
 const CSKH_URL     = process.env.FOLLOW_CSKH_URL || null;
-// Cooldown tra cứu chủ động — tránh khách bấm gửi dồn dập làm spam BO.
+// Cooldown tra cứu chủ động — tránh khách bấm gửi dồn dập làm spam tin nhắn.
 const CHECK_COOLDOWN_MS = 10_000;
 
 let BOT_USERNAME = process.env.FOLLOW_TG_BOT_USERNAME || null;
@@ -59,16 +57,13 @@ const api = () => `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // ── State (in-memory + persist file) ────────────────────────────────────────
 const pendingTokens = new Map(); // token(12 ký tự) -> { username, transferContent, createdAt, expiresAt }
-const subs          = new Map(); // chatId -> subscription object (theo dõi đẩy, có hạn TTL_MS)
-// chatId -> { username, transferContent, updatedAt, lastNotifiedDepositTime }
-// Bảng nhớ vĩnh viễn để khách tra cứu chủ động bất cứ lúc nào, kể cả sau khi
-// sub push đã hết hạn hoặc đã báo credited xong.
+// chatId -> { username, transferContent, rootId, updatedAt, lastStatus, lastNote }
+// Bảng nhớ vĩnh viễn để khách tra cứu chủ động bất cứ lúc nào; rootId trỏ
+// thẳng tới message gốc trong cache của telegram.js (nơi CS xác nhận).
 const knownUsers    = new Map();
 const lastCheckAt   = new Map(); // chatId -> timestamp (cooldown tra cứu chủ động)
 
-let _polling    = false;
 let _saveTimer  = null;
-let _pollTimer  = null;
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 function loadDb() {
@@ -76,9 +71,8 @@ function loadDb() {
     if (!fs.existsSync(DB_PATH)) return;
     const raw  = fs.readFileSync(DB_PATH, "utf8");
     const data = JSON.parse(raw);
-    for (const s of data.subs || []) subs.set(s.chatId, s);
     for (const k of data.known || []) knownUsers.set(k.chatId, k);
-    logger.info("Follow DB loaded", { subs: subs.size, known: knownUsers.size });
+    logger.info("Follow DB loaded", { known: knownUsers.size });
   } catch (e) {
     logger.error("Follow DB load failed", { error: e.message });
   }
@@ -87,7 +81,6 @@ function loadDb() {
 function saveDbNow() {
   try {
     fs.writeFileSync(DB_PATH, JSON.stringify({
-      subs:  Array.from(subs.values()),
       known: Array.from(knownUsers.entries()).map(([chatId, v]) => ({ chatId, ...v })),
     }, null, 2));
   } catch (e) {
@@ -100,8 +93,8 @@ function saveDbDebounced() {
   _saveTimer = setTimeout(saveDbNow, 2_000);
 }
 
-// ── Ghi nhớ liên kết chatId <-> username (vĩnh viễn, để tra cứu chủ động) ─────
-function rememberUser(chatId, username, transferContent) {
+// ── Ghi nhớ liên kết chatId <-> username/rootId (vĩnh viễn, để tra cứu) ───────
+function rememberUser(chatId, username, transferContent, rootId) {
   if (knownUsers.size >= MAX_KNOWN && !knownUsers.has(chatId)) {
     // LRU đơn giản: xoá bản ghi cũ nhất (Map giữ thứ tự insert)
     knownUsers.delete(knownUsers.keys().next().value);
@@ -110,8 +103,10 @@ function rememberUser(chatId, username, transferContent) {
   knownUsers.set(chatId, {
     username:        (username || prev.username || "").trim(),
     transferContent: (transferContent || prev.transferContent || "").trim(),
-    updatedAt: Date.now(),
-    lastNotifiedDepositTime: prev.lastNotifiedDepositTime || null,
+    rootId:          rootId != null ? Number(rootId) : (prev.rootId || null),
+    updatedAt:       Date.now(),
+    lastStatus:      prev.lastStatus || null,
+    lastNote:        prev.lastNote   || null,
   });
 }
 
@@ -127,8 +122,6 @@ function genToken() {
 function escapeHtml(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function cskhKeyboard() {
   if (!CSKH_URL) return undefined;
@@ -171,33 +164,84 @@ function createFollowLink(username, transferContent) {
   };
 }
 
-// ── Tạo/gia hạn sub theo dõi đẩy cho 1 chatId ─────────────────────────────────
-async function armSubscription(chatId, username, transferContent) {
-  let baseline = { status: "unknown", creditedDepositTime: null };
-  try {
-    const bo = await lookupDeposit(username);
-    baseline.status = bo.status;
-    if (bo.status === "credited") baseline.creditedDepositTime = bo.depositTime;
-  } catch (e) {
-    logger.warn("Follow baseline lookup failed", { username, error: e.message });
+// ── Gắn liên kết ngay tại thời điểm tạo: gửi tin vào nhóm CS + lưu chatId ─────
+// Giống hệt tư duy t3Links: liên kết được lưu NGAY khi tin được tạo ra, không
+// cần job nền đi khớp lại sau. Trả về entry (có message_id) hoặc null nếu lỗi.
+async function registerFollowInvoice(chatId, username, transferContent) {
+  const token       = process.env.URGENT_TG_BOT_TOKEN;
+  const csGroupId   = process.env.URGENT_TG_GROUP_ID;
+
+  if (!token || !csGroupId) {
+    logger.error("Follow: thiếu cấu hình URGENT_TG_BOT_TOKEN/URGENT_TG_GROUP_ID");
+    return null;
   }
 
-  subs.set(chatId, {
-    chatId,
+  const caption = [
+    username || "-",
+    "-", // họ tên — chưa có tại bước khách bấm theo dõi
+    transferContent || "-",
+    "-", // mã nội bộ — chưa có tại bước này
+    "Khách bấm \"Theo dõi qua Telegram\"",
+    "-",
+  ].join("\n");
+
+  let sent;
+  try {
+    const r = await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: csGroupId,
+      text: caption,
+      reply_markup: telegramService.buildCskhKeyboard(),
+    }, { timeout: 15_000 });
+    sent = r.data?.result;
+  } catch (e) {
+    logger.error("Follow: gửi tin nhóm CS thất bại", { error: e.response?.data || e.message, username });
+    return null;
+  }
+
+  const entry = addManualInvoice({
+    messageId:    sent?.message_id,
     username,
-    transferContent: transferContent || "",
-    baseline,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + TTL_MS,
+    fullname:     null,
+    ckCode:       transferContent,
+    orderCode:    "-",
+    status:       "-",
+    note:         "Khách bấm \"Theo dõi qua Telegram\"",
+    followChatId: chatId,
   });
 
-  return baseline;
+  logger.info("Follow invoice registered", { chatId, username, rootId: entry.message_id });
+  return entry;
+}
+
+// ── Bắn kết quả trạng thái thẳng về DM khách (gọi bởi telegram.js) ───────────
+// Đây là điểm mà handleCskhCallback ("cskh:done") và processT3Reply gọi vào
+// ngay khi CS chốt trạng thái — không cần khách hỏi lại.
+async function sendStatusToCustomer(chatId, status, note) {
+  if (!chatId) return;
+
+  const known = knownUsers.get(chatId);
+  if (known) {
+    known.lastStatus = status || known.lastStatus;
+    known.lastNote   = note   || known.lastNote;
+    known.updatedAt  = Date.now();
+    saveDbDebounced();
+  }
+
+  const lines = [];
+  if (status === "Đã lên điểm") {
+    lines.push("✅ <b>Hóa đơn của bạn đã được ghi nhận!</b>");
+  } else {
+    lines.push(`ℹ️ Cập nhật trạng thái đơn: <b>${escapeHtml(status || "-")}</b>`);
+  }
+  if (note) lines.push(escapeHtml(note));
+
+  return tgSend(chatId, lines.join("\n\n"), { reply_markup: cskhKeyboard() });
 }
 
 // ── Tra cứu chủ động theo yêu cầu (khách gõ bất kỳ tin nhắn nào) ──────────────
 async function checkNow(chatId) {
   const known = knownUsers.get(chatId);
-  if (!known || !known.username) {
+  if (!known || !known.rootId) {
     return tgSend(chatId,
       "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm \"Theo dõi qua Telegram\" để bắt đầu liên kết tài khoản."
     );
@@ -210,65 +254,37 @@ async function checkNow(chatId) {
   }
   lastCheckAt.set(chatId, now);
 
-  try {
-    invalidateDepositCache(known.username);
-    const bo = await lookupDeposit(known.username);
-
-    if (bo.status === "credited") {
-      const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-      const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
-      const isNew = known.lastNotifiedDepositTime !== bo.depositTime;
-
-      await tgSend(chatId,
-        `✅ Hóa đơn của bạn đã được ghi nhận!\n\n💰 Số tiền: <b>${amt}</b>\n🕒 Lúc: ${time}`
-      );
-
-      if (isNew) {
-        try {
-          addBoCredit({
-            username:    known.username,
-            ckCode:      known.transferContent || null,
-            depositAmt:  bo.depositAmt,
-            depositTime: bo.depositTime,
-          });
-        } catch (e) {
-          logger.warn("Follow addBoCredit failed (on-demand)", { username: known.username, error: e.message });
-        }
-        logger.info("Follow on-demand notified credited", { chatId, username: known.username });
-      }
-
-      known.lastNotifiedDepositTime = bo.depositTime;
-      known.updatedAt = now;
-      subs.delete(chatId); // đã có kết quả cuối cùng → không cần đẩy tự động nữa
-      saveDbDebounced();
-      return;
-    }
-
-    if (bo.status === "pending") {
-      // Nếu sub push đã hết hạn/không còn tồn tại → tái kích hoạt (gia hạn)
-      // theo dõi đẩy ngay tại đây, coi như khách vừa "khai lại" chỉ bằng 1 tin nhắn.
-      const hadActiveSub = subs.has(chatId);
-      if (!hadActiveSub) {
-        await armSubscription(chatId, known.username, known.transferContent);
-        saveDbDebounced();
-      }
-      return tgSend(chatId,
-        `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang chờ duyệt.\n\n` +
-        (hadActiveSub
-          ? "Hệ thống vẫn đang tự động theo dõi — mình sẽ nhắn ngay khi có kết quả."
-          : "Mình đã tự động bật lại theo dõi cho đơn này — bạn không cần quay lại web, cứ chờ mình nhắn khi có kết quả, hoặc gõ bất kỳ lúc nào để kiểm tra lại.")
-      );
-    }
-
+  const result = getInvoiceStatusByMsgId(known.rootId);
+  if (!result) {
     return tgSend(chatId,
       `❓ Chưa tìm thấy thông tin đơn cho tài khoản <b>${escapeHtml(known.username)}</b>. Vui lòng liên hệ CSKH để được hỗ trợ.`,
       { reply_markup: cskhKeyboard() }
     );
-
-  } catch (e) {
-    logger.error("Follow checkNow failed", { chatId, username: known.username, error: e.message });
-    return tgSend(chatId, "⚠️ Không thể kiểm tra lúc này, vui lòng thử lại sau ít phút.");
   }
+
+  known.lastStatus = result.status;
+  known.lastNote   = result.note;
+  known.updatedAt  = now;
+  saveDbDebounced();
+
+  if (result.status === "Đã lên điểm") {
+    return tgSend(chatId,
+      `✅ Hóa đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đã được ghi nhận!` +
+      (result.note ? `\n\n${escapeHtml(result.note)}` : "")
+    );
+  }
+
+  if (!result.status || result.status === "-") {
+    return tgSend(chatId,
+      `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang chờ CSKH xử lý. Mình sẽ nhắn ngay khi có kết quả, hoặc bạn cứ nhắn lại vào đây bất cứ lúc nào để kiểm tra.`
+    );
+  }
+
+  return tgSend(chatId,
+    `ℹ️ Trạng thái đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>): <b>${escapeHtml(result.status)}</b>` +
+    (result.note ? `\n\n${escapeHtml(result.note)}` : ""),
+    { reply_markup: cskhKeyboard() }
+  );
 }
 
 // ── Webhook Telegram (POST /webhook/follow) ────────────────────────────────────
@@ -298,158 +314,45 @@ async function handleWebhook(update) {
     }
     pendingTokens.delete(token); // dùng 1 lần
 
-    if (subs.size >= MAX_SUBS && !subs.has(chatId)) {
-      return tgSend(chatId, "⚠️ Hệ thống đang quá tải theo dõi, vui lòng thử lại sau ít phút.");
+    const entry = await registerFollowInvoice(chatId, pending.username, pending.transferContent);
+    if (!entry) {
+      return tgSend(chatId,
+        "⚠️ Không thể ghi nhận theo dõi lúc này, vui lòng thử lại sau ít phút hoặc liên hệ CSKH.",
+        { reply_markup: cskhKeyboard() }
+      );
     }
 
-    // Chụp mốc gốc: nếu đơn ĐÃ credited từ trước, lưu depositTime đó lại để
-    // không báo nhầm đơn cũ — chỉ báo khi có depositTime MỚI khác mốc này.
-    const baseline = await armSubscription(chatId, pending.username, pending.transferContent);
-    rememberUser(chatId, pending.username, pending.transferContent);
+    rememberUser(chatId, pending.username, pending.transferContent, entry.message_id);
     saveDbDebounced();
 
-    logger.info("Follow subscription created", { chatId, username: pending.username });
+    logger.info("Follow subscription created", { chatId, username: pending.username, rootId: entry.message_id });
 
     return tgSend(chatId,
-      `✅ Đã bắt đầu theo dõi hóa đơn cho tài khoản <b>${escapeHtml(pending.username)}</b>` +
+      `✅ Đã ghi nhận theo dõi hóa đơn cho tài khoản <b>${escapeHtml(pending.username)}</b>` +
       (pending.transferContent ? ` (mã CK: ${escapeHtml(pending.transferContent)})` : "") +
-      `.\n\nHệ thống sẽ tự động nhắn ngay khi hóa đơn được ghi nhận — bạn không cần quay lại web để kiểm tra.\n\n` +
-      `⏱ Theo dõi đẩy tự động trong ${Math.round(TTL_MS / 3600_000)} giờ. Sau đó (hoặc bất cứ lúc nào) bạn cứ nhắn lại vào đây để mình kiểm tra ngay, không cần khai lại trên web. Gõ /stop để dừng theo dõi, /status để xem trạng thái.`
+      `.\n\nBộ phận CSKH sẽ xử lý và mình sẽ nhắn ngay cho bạn khi có kết quả — không cần quay lại web để kiểm tra.\n\n` +
+      `Bạn cũng có thể nhắn lại vào đây bất cứ lúc nào để mình kiểm tra trạng thái mới nhất, hoặc gõ /status.`
     );
   }
 
-  if (text === "/stop") {
-    if (subs.has(chatId)) {
-      subs.delete(chatId);
-      saveDbDebounced();
-      return tgSend(chatId, "🛑 Đã dừng theo dõi tự động. Bạn vẫn có thể nhắn lại vào đây bất cứ lúc nào để mình kiểm tra đơn giúp bạn.");
-    }
-    return tgSend(chatId, "Bạn hiện không theo dõi hóa đơn nào.");
-  }
-
   if (text === "/status" || text === "/check") {
-    if (subs.has(chatId)) {
-      const sub = subs.get(chatId);
-      const mins = Math.max(0, Math.floor((sub.expiresAt - Date.now()) / 60_000));
-      return tgSend(chatId, `Đang theo dõi tài khoản <b>${escapeHtml(sub.username)}</b>. Còn khoảng ${mins} phút theo dõi tự động.`);
-    }
-    // Không còn sub push đang chạy — coi /status như 1 lần tra cứu chủ động.
     return checkNow(chatId);
   }
 
-  // Bất kỳ tin nhắn nào khác — coi như khách muốn kiểm tra lại đơn cũ ngay,
-  // không cần khai lại trên web.
+  // Bất kỳ tin nhắn nào khác — coi như khách muốn kiểm tra lại đơn ngay.
   return checkNow(chatId);
 }
 
-// ── Vòng poll (mỗi FOLLOW_POLL_MS) ──────────────────────────────────────────────
-async function pollOnce() {
-  if (_polling) {
-    logger.warn("Follow poll bị bỏ qua — vòng trước chưa xong (BO chậm)");
-    return;
-  }
-  _polling = true;
-
-  try {
-    const now = Date.now();
-
-    // Xử lý hết hạn theo dõi đẩy trước — chỉ tắt đẩy tự động, KHÔNG xoá
-    // knownUsers, để khách vẫn tra cứu chủ động được bất cứ lúc nào sau này.
-    for (const [chatId, sub] of subs) {
-      if (now > sub.expiresAt) {
-        tgSend(chatId,
-          `⏱ Đã tạm dừng theo dõi tự động do quá ${Math.round(TTL_MS / 3600_000)} giờ. ` +
-          "Đơn vẫn có thể đang chờ xử lý — bạn cứ nhắn lại vào đây bất cứ lúc nào để mình kiểm tra ngay, không cần khai lại trên web. Nếu cần hỗ trợ thêm, vui lòng liên hệ CSKH.",
-          { reply_markup: cskhKeyboard() }
-        );
-        subs.delete(chatId);
-      }
-    }
-
-    // Gom theo username — 1 tài khoản chỉ gọi BO 1 lần mỗi vòng dù có nhiều sub
-    const byUsername = new Map();
-    for (const sub of subs.values()) {
-      const key = sub.username.toLowerCase();
-      if (!byUsername.has(key)) byUsername.set(key, []);
-      byUsername.get(key).push(sub);
-    }
-
-    let changed = false;
-    let i = 0;
-    for (const [username, subList] of byUsername) {
-      if (i > 0) await sleep(STAGGER_MS); // giãn cách giữa các username
-      i++;
-
-      try {
-        invalidateDepositCache(username); // cache 5 phút → phải xoá trước khi poll
-        const bo = await lookupDeposit(username);
-
-        if (bo.status !== "credited") continue;
-
-        for (const sub of subList) {
-          const alreadyNotified = sub.baseline.creditedDepositTime === bo.depositTime;
-          if (alreadyNotified) continue;
-
-          const time = new Date(bo.depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-          const amt  = Number(bo.depositAmt).toLocaleString("vi-VN");
-
-          tgSend(sub.chatId,
-            `✅ Hóa đơn của bạn đã được ghi nhận!\n\n💰 Số tiền: <b>${amt}</b>\n🕒 Lúc: ${time}\n\nCảm ơn bạn đã chờ đợi.`
-          );
-
-          try {
-            addBoCredit({
-              username:    sub.username,
-              ckCode:      sub.transferContent || null,
-              depositAmt:  bo.depositAmt,
-              depositTime: bo.depositTime,
-            });
-          } catch (e) {
-            logger.warn("Follow addBoCredit failed", { username: sub.username, error: e.message });
-          }
-
-          sub.baseline.creditedDepositTime = bo.depositTime;
-          sub.baseline.status = "credited";
-
-          const known = knownUsers.get(sub.chatId);
-          if (known) known.lastNotifiedDepositTime = bo.depositTime;
-
-          subs.delete(sub.chatId); // đã báo xong → dừng theo dõi đẩy luôn
-          changed = true;
-
-          logger.info("Follow notified credited", { chatId: sub.chatId, username, amt, time });
-        }
-      } catch (e) {
-        logger.error("Follow poll lookupDeposit failed", { username, error: e.message });
-      }
-    }
-
-    if (changed) saveDbDebounced();
-
-  } finally {
-    _polling = false;
-  }
-}
-
-// ── Admin: xem ai đang được theo dõi ────────────────────────────────────────────
+// ── Admin: xem ai đang được liên kết theo dõi ───────────────────────────────────
 function getAll() {
-  return Array.from(subs.values()).map(s => ({
-    chatId:          s.chatId,
-    username:        s.username,
-    transferContent: s.transferContent,
-    baselineStatus:  s.baseline.status,
-    createdAt:       new Date(s.createdAt).toISOString(),
-    expiresAt:       new Date(s.expiresAt).toISOString(),
-  }));
-}
-
-function getAllKnown() {
   return Array.from(knownUsers.entries()).map(([chatId, v]) => ({
     chatId,
     username:        v.username,
     transferContent: v.transferContent,
+    rootId:          v.rootId,
+    lastStatus:      v.lastStatus,
+    lastNote:        v.lastNote,
     updatedAt:       new Date(v.updatedAt).toISOString(),
-    hasActiveSub:    subs.has(chatId),
   }));
 }
 
@@ -492,11 +395,7 @@ async function start(publicUrl) {
     logger.warn("PUBLIC_URL chưa set — bỏ qua setWebhook cho follow bot");
   }
 
-  _pollTimer = setInterval(() => {
-    pollOnce().catch(e => logger.error("Follow pollOnce crashed", { error: e.message }));
-  }, POLL_MS);
-
-  logger.info("Follow poll loop started", { intervalMs: POLL_MS, ttlHours: TTL_MS / 3600_000 });
+  logger.info("Follow module started (chế độ CS xác nhận tay, không còn polling BO)");
 }
 
-module.exports = { start, createFollowLink, handleWebhook, getAll, getAllKnown };
+module.exports = { start, createFollowLink, handleWebhook, getAll, sendStatusToCustomer };

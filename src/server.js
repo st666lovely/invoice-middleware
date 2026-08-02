@@ -11,6 +11,7 @@ const multer   = require("multer");
 const { searchInvoiceByAll, telegramService, addRuntimeStatus, getDebugCache, getInvoiceStats, addManualInvoice, addBoCredit, getBoCreditStats } = require("./telegram");
 const { fetchDepositRemarkByUsername } = require("./boBrowser");
 const { lookupDeposit, invalidateDepositCache } = require("./st666api");
+const follow = require("./follow");
 const logger = require("./logger");
 
 // ── Multer ────────────────────────────────────────────────────────────────────
@@ -110,6 +111,12 @@ app.get("/my-ip", async (_req, res) => {
 app.post("/webhook/telegram", async (req, res) => {
   try { await telegramService.processUpdate(req.body); }
   catch (e) { logger.error("TG error", { error: e.message }); }
+  res.json({ ok: true });
+});
+
+app.post("/webhook/follow", async (req, res) => {
+  try { await follow.handleWebhook(req.body); }
+  catch (e) { logger.error("Follow webhook error", { error: e.message }); }
   res.json({ ok: true });
 });
 
@@ -215,6 +222,27 @@ app.post("/api/check-invoice", checkInvoiceLimit, upload.single("image"), async 
   } catch (err) {
     logger.error("Web check-invoice error", { error: err.message });
     return res.json({ found: false, error: "Lỗi hệ thống, vui lòng thử lại" });
+  }
+});
+
+// ── Public API — Theo dõi hóa đơn qua Telegram ───────────────────────────────
+const followInvoiceLimit = rateLimit({
+  windowMs: 60 * 1000, max: 10,
+  message: { ok: false, error: "Quá nhiều yêu cầu, vui lòng chờ 1 phút" },
+  standardHeaders: true, legacyHeaders: false,
+});
+
+app.post("/api/follow-invoice", followInvoiceLimit, (req, res) => {
+  const { username, transferContent } = req.body || {};
+  if (!username) {
+    return res.status(400).json({ ok: false, error: "Thiếu tài khoản" });
+  }
+  try {
+    const { link, expiresInMinutes } = follow.createFollowLink(username, transferContent);
+    res.json({ ok: true, link, expiresInMinutes });
+  } catch (e) {
+    logger.error("Follow-invoice create link failed", { error: e.message, username });
+    res.status(503).json({ ok: false, error: e.message });
   }
 });
 
@@ -402,6 +430,10 @@ app.post("/admin/cache/warmup", adminAuth, async (req, res) => {
   catch (e) { logger.error("Manual warmup failed", { error: e.message }); }
 });
 
+app.get("/admin/follow", adminAuth, (_req, res) => {
+  res.json({ ok: true, subs: follow.getAll() });
+});
+
 app.post("/admin/status/add", adminAuth, (req, res) => {
   const { kw, full, emoji } = req.body;
   if (!kw || !full) return res.status(400).json({ error: "Thiếu kw hoặc full" });
@@ -428,6 +460,9 @@ app.listen(PORT, async () => {
   } else {
     logger.warn("PUBLIC_URL not set, skipping cache warmup");
   }
+
+  follow.start(PUBLIC_URL)
+    .catch(e => logger.error("Follow start failed", { error: e.message }));
 });
 
 module.exports = app;

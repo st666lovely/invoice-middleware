@@ -58,7 +58,9 @@ const DB_PATH    = process.env.FOLLOW_DB_PATH   || "./follow-db.json";
 // hạn theo dung lượng (LRU đơn giản: xoá bản ghi cũ nhất khi đầy).
 const MAX_KNOWN  = parseInt(process.env.FOLLOW_MAX_KNOWN) || 5000;
 const TOKEN_TTL_MS = 30 * 60_000; // link Start hết hạn sau 30 phút nếu chưa bấm
-const CSKH_URL     = process.env.FOLLOW_CSKH_URL || null;
+// Link CSKH gắn vào nút dưới mỗi tin nhắn. Có mặc định để nút luôn hiện kể cả
+// khi chưa khai biến môi trường — AE888 thì set FOLLOW_CSKH_URL để đè lên.
+const CSKH_URL     = process.env.FOLLOW_CSKH_URL || "https://t.me/st666cskh247";
 // Cooldown tra cứu chủ động — tránh khách bấm gửi dồn dập làm spam tin nhắn.
 const CHECK_COOLDOWN_MS = 10_000;
 // Khách đã bấm Start nhưng hối thúc chưa gửi được tin vào nhóm CS sau ngần
@@ -379,7 +381,8 @@ async function checkNow(chatId) {
   const known = knownUsers.get(chatId);
   if (!known) {
     return tgSend(chatId,
-      "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm nút hối thúc & theo dõi để bắt đầu liên kết tài khoản."
+      "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm nút hối thúc & theo dõi để bắt đầu liên kết tài khoản.",
+      { reply_markup: cskhKeyboard() }
     );
   }
 
@@ -414,13 +417,16 @@ async function checkNow(chatId) {
   if (result.status === "Đã lên điểm") {
     return tgSend(chatId,
       `✅ Hóa đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đã được ghi nhận!` +
-      (result.note ? `\n\n${escapeHtml(result.note)}` : "")
+      (result.note ? `\n\n${escapeHtml(result.note)}` : "") +
+      `\n\nCần hỗ trợ thêm, bạn bấm nút bên dưới để gặp CSKH nhé.`,
+      { reply_markup: cskhKeyboard() }
     );
   }
 
   if (!result.status || result.status === "-") {
     return tgSend(chatId,
-      `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang chờ CSKH xử lý. Mình sẽ nhắn ngay khi có kết quả, hoặc bạn cứ nhắn lại vào đây bất cứ lúc nào để kiểm tra.`
+      `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang chờ CSKH xử lý. Mình sẽ nhắn ngay khi có kết quả, hoặc bạn cứ nhắn lại vào đây bất cứ lúc nào để kiểm tra.`,
+      { reply_markup: cskhKeyboard() }
     );
   }
 
@@ -446,14 +452,16 @@ async function handleWebhook(update) {
       // một lần tra cứu chủ động; nếu chưa, hướng dẫn ra web.
       if (knownUsers.has(chatId)) return checkNow(chatId);
       return tgSend(chatId,
-        "👋 Chào bạn. Vui lòng bấm nút \"Theo dõi qua Telegram\" trên trang tra cứu hóa đơn để bắt đầu."
+        "👋 Chào bạn. Vui lòng bấm nút \"Theo dõi qua Telegram\" trên trang tra cứu hóa đơn để bắt đầu.",
+        { reply_markup: cskhKeyboard() }
       );
     }
 
     const pending = pendingTokens.get(token);
     if (!pending) {
       return tgSend(chatId,
-        "⚠️ Link theo dõi không hợp lệ hoặc đã hết hạn (30 phút). Vui lòng quay lại trang web và bấm \"Theo dõi qua Telegram\" lại."
+        "⚠️ Link theo dõi không hợp lệ hoặc đã hết hạn (30 phút). Vui lòng quay lại trang web và bấm \"Theo dõi qua Telegram\" lại.",
+        { reply_markup: cskhKeyboard() }
       );
     }
     // Ghi nhận chatId vào token. KHÔNG gửi tin riêng vào nhóm CS nữa —
@@ -482,7 +490,8 @@ async function handleWebhook(update) {
       `✅ Đã ghi nhận theo dõi hóa đơn cho tài khoản <b>${escapeHtml(pending.username)}</b>` +
       (pending.transferContent ? ` (mã CK: ${escapeHtml(pending.transferContent)})` : "") +
       `.\n\nBộ phận CSKH sẽ xử lý và mình sẽ nhắn ngay cho bạn khi có kết quả — không cần quay lại web để kiểm tra.\n\n` +
-      `Bạn cũng có thể nhắn lại vào đây bất cứ lúc nào để mình kiểm tra trạng thái mới nhất, hoặc gõ /status.`
+      `Bạn cũng có thể nhắn lại vào đây bất cứ lúc nào để mình kiểm tra trạng thái mới nhất, hoặc gõ /status.`,
+      { reply_markup: cskhKeyboard() }
     );
   }
 

@@ -1,15 +1,25 @@
 "use strict";
 
 /**
- * follow.js — Theo dõi hóa đơn chủ động qua Telegram (v2)
+ * follow.js — Theo dõi hóa đơn chủ động qua Telegram (v3 — gộp với hối thúc)
  *
- * Thiết kế mới (thay cho polling BO 30s):
- * - Khách bấm "Theo dõi qua Telegram" trên web → mở Telegram → bấm Start.
- * - Ngay khi Start thành công: gửi 1 tin nhắn format chuẩn (giống
- *   addManualInvoice/hối thúc: username / họ tên / mã CK / mã nội bộ / ghi
- *   chú / trạng thái) vào nhóm CS nội bộ (dùng chung URGENT_TG_BOT_TOKEN/
- *   URGENT_TG_GROUP_ID — đúng bot/nhóm mà luồng "hối thúc" đang dùng), đồng
- *   thời gắn liền chatId của khách vào entry đó trong cache của telegram.js
+ * Thiết kế:
+ * - Web chỉ còn 1 nút "Hối thúc & Theo dõi". Khi khách bấm:
+ *     1. POST /api/follow-invoice  -> nhận token + link t.me (nhanh, đồng bộ)
+ *     2. POST /api/urgent-invoice  -> gửi tin hối thúc ĐẦY ĐỦ (ảnh hóa đơn,
+ *        họ tên, mã CK, mã nội bộ từ BO) vào nhóm CS, kèm followToken
+ *     3. Web mở Telegram -> khách bấm Start
+ * - Nhóm CS chỉ nhận 1 tin duy nhất (tin hối thúc đầy đủ), không còn tin
+ *   rỗng toàn dấu "-" như bản v2.
+ * - Vì /api/urgent-invoice chạy nền (BO lookup + có thể cả Playwright) nên
+ *   message_id chỉ có sau vài giây, trong khi khách có thể bấm Start trước.
+ *   Cơ chế "chờ khớp" hai chiều xử lý cả 2 thứ tự:
+ *     · Start trước  -> giữ chatId trong token, hối thúc xong thì gắn vào
+ *     · Hối thúc trước -> giữ root trong token, Start đến thì gắn ngay
+ *   Nếu quá FOLLOW_MATCH_FALLBACK_MS mà hối thúc không gửi được tin nào
+ *   (BO không trả mã nội bộ, lỗi mạng...) thì tự tạo tin dự phòng vào nhóm
+ *   CS để khách không bị bỏ rơi.
+ * - chatId của khách được gắn vào entry trong cache của telegram.js
  *   (trường followChatId trên imageCache — cùng tư duy với t3Links).
  * - CS xử lý y như luồng hối thúc hiện tại (bấm nút ✅/❌, hoặc chuyển T3).
  * - Ngay tại 2 điểm telegram.js chốt trạng thái cuối (handleCskhCallback
@@ -51,12 +61,22 @@ const TOKEN_TTL_MS = 30 * 60_000; // link Start hết hạn sau 30 phút nếu c
 const CSKH_URL     = process.env.FOLLOW_CSKH_URL || null;
 // Cooldown tra cứu chủ động — tránh khách bấm gửi dồn dập làm spam tin nhắn.
 const CHECK_COOLDOWN_MS = 10_000;
+// Khách đã bấm Start nhưng hối thúc chưa gửi được tin vào nhóm CS sau ngần
+// này thì tự tạo tin dự phòng, tránh khách chờ mãi không ai xử lý.
+const MATCH_FALLBACK_MS = parseInt(process.env.FOLLOW_MATCH_FALLBACK_MS) || 90_000;
 
 let BOT_USERNAME = process.env.FOLLOW_TG_BOT_USERNAME || null;
 const api = () => `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // ── State (in-memory + persist file) ────────────────────────────────────────
-const pendingTokens = new Map(); // token(12 ký tự) -> { username, transferContent, createdAt, expiresAt }
+// token(12 ký tự) -> {
+//   username, transferContent, createdAt, expiresAt,
+//   chatId  : có khi khách đã bấm Start
+//   root    : có khi hối thúc đã gửi xong tin vào nhóm CS
+//   timer   : hẹn giờ tạo tin dự phòng nếu chờ root quá lâu
+// }
+// Token chỉ bị xoá khi đã khớp đủ cả 2 vế, hoặc hết hạn mà chưa ai dùng.
+const pendingTokens = new Map();
 // chatId -> { username, transferContent, rootId, updatedAt, lastStatus, lastNote }
 // Bảng nhớ vĩnh viễn để khách tra cứu chủ động bất cứ lúc nào; rootId trỏ
 // thẳng tới message gốc trong cache của telegram.js (nơi CS xác nhận).
@@ -147,7 +167,11 @@ function createFollowLink(username, transferContent) {
   if (!BOT_USERNAME) throw new Error("Bot chưa sẵn sàng (đang lấy username), thử lại sau vài giây");
 
   const now = Date.now();
-  for (const [tok, v] of pendingTokens) if (now > v.expiresAt) pendingTokens.delete(tok);
+  for (const [tok, v] of pendingTokens) {
+    // Chỉ dọn token chưa ai dùng. Token đã có chatId hoặc root nghĩa là đang
+    // chờ khớp nốt vế còn lại — xoá lúc này sẽ làm đứt liên kết của khách.
+    if (now > v.expiresAt && !v.chatId && !v.root) pendingTokens.delete(tok);
+  }
 
   const token = genToken();
   pendingTokens.set(token, {
@@ -164,6 +188,118 @@ function createFollowLink(username, transferContent) {
   };
 }
 
+// ── Khớp token với tin hối thúc (2 chiều) ────────────────────────────────────
+
+// Server.js gọi TRƯỚC khi addManualInvoice để biết có gắn followChatId luôn
+// được không (trường hợp khách đã bấm Start xong từ trước).
+function getChatIdForToken(token) {
+  if (!token) return null;
+  const p = pendingTokens.get(token);
+  return p && p.chatId ? p.chatId : null;
+}
+
+// Cả 2 vế đã đủ — gắn chatId khách vào đúng entry của tin hối thúc.
+function linkRootToChat(token, pending) {
+  clearTimeout(pending.timer);
+  pending.timer = null;
+
+  const r = pending.root;
+  // Gọi lại addManualInvoice với cùng message_id: ghi đè entry trong
+  // imageCache kèm followChatId. replyIndex nằm riêng nên các reply CS đã có
+  // không bị mất.
+  const entry = addManualInvoice({
+    messageId:    r.messageId,
+    username:     r.username     || pending.username,
+    fullname:     r.fullname     || null,
+    ckCode:       r.ckCode       || pending.transferContent,
+    orderCode:    r.orderCode    || "-",
+    status:       r.status       || "-",
+    note:         r.note         || null,
+    fileId:       r.fileId       || null,
+    followChatId: pending.chatId,
+  });
+
+  rememberUser(
+    pending.chatId,
+    r.username || pending.username,
+    r.ckCode   || pending.transferContent,
+    entry.message_id
+  );
+  saveDbDebounced();
+  pendingTokens.delete(token);
+
+  logger.info("Follow linked to urgent message", {
+    token, chatId: pending.chatId, rootId: entry.message_id, username: entry.username,
+  });
+  return entry;
+}
+
+// Server.js gọi SAU khi gửi tin hối thúc thành công.
+function attachUrgentRoot(token, root) {
+  if (!token || !root || !root.messageId) return false;
+  const pending = pendingTokens.get(token);
+  if (!pending) {
+    logger.warn("Follow attachUrgentRoot: token không tồn tại", { token });
+    return false;
+  }
+  pending.root = root;
+  if (pending.chatId) linkRootToChat(token, pending);
+  return true;
+}
+
+// Server.js gọi khi hối thúc phát hiện đơn ĐÃ lên điểm nên không gửi nhóm CS.
+// Báo thẳng khách rồi huỷ token, không để hẹn giờ dự phòng bắn tin thừa.
+function resolveAlreadyCredited(token, depositAmt, depositTime) {
+  if (!token) return false;
+  const pending = pendingTokens.get(token);
+  if (!pending) return false;
+
+  clearTimeout(pending.timer);
+  pendingTokens.delete(token);
+
+  if (!pending.chatId) return false; // khách chưa bấm Start thì thôi
+
+  let extra = "";
+  try {
+    const amt  = Number(depositAmt);
+    const time = depositTime
+      ? new Date(depositTime).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })
+      : null;
+    if (Number.isFinite(amt) && amt > 0) extra += `\n\n💰 Số tiền: <b>${amt.toLocaleString("vi-VN")}</b>`;
+    if (time) extra += `\n🕐 Thời gian: ${escapeHtml(time)}`;
+  } catch (e) { /* bỏ qua, chỉ là phần hiển thị thêm */ }
+
+  tgSend(pending.chatId,
+    `✅ <b>Đơn nạp của bạn đã được ghi nhận!</b>${extra}\n\nVui lòng kiểm tra lại số dư tài khoản.`,
+    { reply_markup: cskhKeyboard() }
+  );
+  logger.info("Follow resolved as already credited", { token, chatId: pending.chatId });
+  return true;
+}
+
+// Hẹn giờ dự phòng: khách đã Start nhưng hối thúc không gửi được tin nào vào
+// nhóm CS (BO không trả mã nội bộ, lỗi mạng, bị chặn trùng...).
+async function fallbackRegister(token) {
+  const pending = pendingTokens.get(token);
+  if (!pending || !pending.chatId || pending.root) return;
+
+  logger.warn("Follow fallback: hối thúc không gửi được tin, tạo tin dự phòng", {
+    token, username: pending.username,
+  });
+
+  const entry = await registerFollowInvoice(pending.chatId, pending.username, pending.transferContent);
+  if (!entry) {
+    return tgSend(pending.chatId,
+      "⚠️ Có trục trặc khi chuyển đơn của bạn tới CSKH. Vui lòng liên hệ CSKH để được hỗ trợ trực tiếp.",
+      { reply_markup: cskhKeyboard() }
+    );
+  }
+
+  rememberUser(pending.chatId, pending.username, pending.transferContent, entry.message_id);
+  saveDbDebounced();
+  pendingTokens.delete(token);
+}
+
 // ── Gắn liên kết ngay tại thời điểm tạo: gửi tin vào nhóm CS + lưu chatId ─────
 // Giống hệt tư duy t3Links: liên kết được lưu NGAY khi tin được tạo ra, không
 // cần job nền đi khớp lại sau. Trả về entry (có message_id) hoặc null nếu lỗi.
@@ -178,10 +314,10 @@ async function registerFollowInvoice(chatId, username, transferContent) {
 
   const caption = [
     username || "-",
-    "-", // họ tên — chưa có tại bước khách bấm theo dõi
+    "-", // họ tên — không có vì tin hối thúc đầy đủ đã thất bại
     transferContent || "-",
-    "-", // mã nội bộ — chưa có tại bước này
-    "Khách bấm \"Theo dõi qua Telegram\"",
+    "-", // mã nội bộ — BO không trả về
+    "Khách theo dõi qua Telegram (chưa lấy được mã nội bộ)",
     "-",
   ].join("\n");
 
@@ -205,7 +341,7 @@ async function registerFollowInvoice(chatId, username, transferContent) {
     ckCode:       transferContent,
     orderCode:    "-",
     status:       "-",
-    note:         "Khách bấm \"Theo dõi qua Telegram\"",
+    note:         "Khách theo dõi qua Telegram (chưa lấy được mã nội bộ)",
     followChatId: chatId,
   });
 
@@ -241,9 +377,17 @@ async function sendStatusToCustomer(chatId, status, note) {
 // ── Tra cứu chủ động theo yêu cầu (khách gõ bất kỳ tin nhắn nào) ──────────────
 async function checkNow(chatId) {
   const known = knownUsers.get(chatId);
-  if (!known || !known.rootId) {
+  if (!known) {
     return tgSend(chatId,
-      "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm \"Theo dõi qua Telegram\" để bắt đầu liên kết tài khoản."
+      "👋 Mình chưa có thông tin đơn nào của bạn. Vui lòng vào trang tra cứu hóa đơn, bấm nút hối thúc & theo dõi để bắt đầu liên kết tài khoản."
+    );
+  }
+
+  // Đã Start nhưng tin hối thúc chưa gửi xong -> chưa có rootId để tra.
+  if (!known.rootId) {
+    return tgSend(chatId,
+      `⏳ Đơn của bạn (tài khoản <b>${escapeHtml(known.username)}</b>) đang được chuyển tới CSKH. Mình sẽ nhắn ngay khi có kết quả.`,
+      { reply_markup: cskhKeyboard() }
     );
   }
 
@@ -312,20 +456,27 @@ async function handleWebhook(update) {
         "⚠️ Link theo dõi không hợp lệ hoặc đã hết hạn (30 phút). Vui lòng quay lại trang web và bấm \"Theo dõi qua Telegram\" lại."
       );
     }
-    pendingTokens.delete(token); // dùng 1 lần
+    // Ghi nhận chatId vào token. KHÔNG gửi tin riêng vào nhóm CS nữa —
+    // tin hối thúc đầy đủ (có ảnh + mã nội bộ) mới là tin chính thức.
+    pending.chatId = chatId;
 
-    const entry = await registerFollowInvoice(chatId, pending.username, pending.transferContent);
-    if (!entry) {
-      return tgSend(chatId,
-        "⚠️ Không thể ghi nhận theo dõi lúc này, vui lòng thử lại sau ít phút hoặc liên hệ CSKH.",
-        { reply_markup: cskhKeyboard() }
-      );
-    }
-
-    rememberUser(chatId, pending.username, pending.transferContent, entry.message_id);
+    // Nhớ khách ngay (rootId để trống, sẽ điền khi khớp được tin hối thúc)
+    // để nếu khách gõ /status trong lúc chờ thì vẫn nhận trả lời đúng.
+    rememberUser(chatId, pending.username, pending.transferContent, null);
     saveDbDebounced();
 
-    logger.info("Follow subscription created", { chatId, username: pending.username, rootId: entry.message_id });
+    if (pending.root) {
+      // Hối thúc đã gửi xong trước khi khách bấm Start — gắn ngay.
+      linkRootToChat(token, pending);
+    } else if (!pending.timer) {
+      // Khách bấm Start trước — chờ hối thúc gửi xong rồi khớp lại.
+      pending.timer = setTimeout(() => {
+        fallbackRegister(token).catch(e =>
+          logger.error("Follow fallbackRegister error", { error: e.message, token })
+        );
+      }, MATCH_FALLBACK_MS);
+      logger.info("Follow chờ khớp tin hối thúc", { chatId, username: pending.username, token });
+    }
 
     return tgSend(chatId,
       `✅ Đã ghi nhận theo dõi hóa đơn cho tài khoản <b>${escapeHtml(pending.username)}</b>` +
@@ -398,4 +549,14 @@ async function start(publicUrl) {
   logger.info("Follow module started (chế độ CS xác nhận tay, không còn polling BO)");
 }
 
-module.exports = { start, createFollowLink, handleWebhook, getAll, sendStatusToCustomer };
+module.exports = {
+  start,
+  createFollowLink,
+  handleWebhook,
+  getAll,
+  sendStatusToCustomer,
+  // Dùng cho luồng gộp hối thúc + theo dõi (gọi từ server.js)
+  getChatIdForToken,
+  attachUrgentRoot,
+  resolveAlreadyCredited,
+};

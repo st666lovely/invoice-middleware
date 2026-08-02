@@ -32,6 +32,7 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: "*" }));
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json({ limit: "20kb" }));
+app.use(express.urlencoded({ extended: true, limit: "20kb" }));
 app.use("/webhook", rateLimit({ windowMs: 60000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
@@ -431,7 +432,7 @@ app.post("/admin/cache/warmup", adminAuth, async (req, res) => {
 });
 
 app.get("/admin/follow", adminAuth, (_req, res) => {
-  res.json({ ok: true, subs: follow.getAll() });
+  res.json({ ok: true, subs: follow.getAll(), known: follow.getAllKnown() });
 });
 
 app.post("/admin/status/add", adminAuth, (req, res) => {

@@ -57,6 +57,9 @@ const DB_PATH    = process.env.FOLLOW_DB_PATH   || "./follow-db.json";
 // chủ động (knownUsers) — bảng này KHÔNG hết hạn theo thời gian, chỉ giới
 // hạn theo dung lượng (LRU đơn giản: xoá bản ghi cũ nhất khi đầy).
 const MAX_KNOWN  = parseInt(process.env.FOLLOW_MAX_KNOWN) || 5000;
+// Số dòng lịch sử tin nhắn giữ lại (cả tin bot gửi lẫn tin khách nhắn).
+// Quá số này thì tự xoá dòng cũ nhất, tránh file dữ liệu phình vô hạn.
+const LOG_MAX    = parseInt(process.env.FOLLOW_LOG_MAX) || 3000;
 const TOKEN_TTL_MS = 30 * 60_000; // link Start hết hạn sau 30 phút nếu chưa bấm
 // Link CSKH gắn vào nút dưới mỗi tin nhắn. Có mặc định để nút luôn hiện kể cả
 // khi chưa khai biến môi trường — AE888 thì set FOLLOW_CSKH_URL để đè lên.
@@ -83,6 +86,12 @@ const pendingTokens = new Map();
 // Bảng nhớ vĩnh viễn để khách tra cứu chủ động bất cứ lúc nào; rootId trỏ
 // thẳng tới message gốc trong cache của telegram.js (nơi CS xác nhận).
 const knownUsers    = new Map();
+// Giữ tạm danh tính Telegram của khách trước khi rememberUser() được gọi
+// (lúc /start, bản ghi knownUsers chưa tồn tại).
+const pendingTgProfile = new Map();
+// Lịch sử tin nhắn, mới nhất nằm cuối mảng.
+// { at, chatId, dir:"out"|"in", text, ok, error, username, tgName }
+const msgLog = [];
 const lastCheckAt   = new Map(); // chatId -> timestamp (cooldown tra cứu chủ động)
 
 let _saveTimer  = null;
@@ -94,7 +103,8 @@ function loadDb() {
     const raw  = fs.readFileSync(DB_PATH, "utf8");
     const data = JSON.parse(raw);
     for (const k of data.known || []) knownUsers.set(k.chatId, k);
-    logger.info("Follow DB loaded", { known: knownUsers.size });
+    if (Array.isArray(data.log)) msgLog.push(...data.log.slice(-LOG_MAX));
+    logger.info("Follow DB loaded", { known: knownUsers.size, log: msgLog.length });
   } catch (e) {
     logger.error("Follow DB load failed", { error: e.message });
   }
@@ -104,7 +114,8 @@ function saveDbNow() {
   try {
     fs.writeFileSync(DB_PATH, JSON.stringify({
       known: Array.from(knownUsers.entries()).map(([chatId, v]) => ({ chatId, ...v })),
-    }, null, 2));
+      log:   msgLog,
+    }));
   } catch (e) {
     logger.error("Follow DB save failed", { error: e.message });
   }
@@ -122,7 +133,15 @@ function rememberUser(chatId, username, transferContent, rootId) {
     knownUsers.delete(knownUsers.keys().next().value);
   }
   const prev = knownUsers.get(chatId) || {};
+  const prof = pendingTgProfile.get(chatId) || {};
   knownUsers.set(chatId, {
+    tgName:          prof.tgName     || prev.tgName     || null,
+    tgUsername:      prof.tgUsername || prev.tgUsername || null,
+    sentCount:       prev.sentCount    || 0,
+    lastSentAt:      prev.lastSentAt   || null,
+    lastSentText:    prev.lastSentText || null,
+    lastError:       prev.lastError    || null,
+    lastErrorAt:     prev.lastErrorAt  || null,
     username:        (username || prev.username || "").trim(),
     transferContent: (transferContent || prev.transferContent || "").trim(),
     rootId:          rootId != null ? Number(rootId) : (prev.rootId || null),
@@ -150,12 +169,52 @@ function cskhKeyboard() {
   return { inline_keyboard: [[{ text: "💬 Liên hệ CSKH", url: CSKH_URL }]] };
 }
 
+// Ghi 1 dòng vào sổ lịch sử tin nhắn.
+function pushLog(chatId, dir, text, errorMsg) {
+  const k = knownUsers.get(chatId) || {};
+  msgLog.push({
+    at:       Date.now(),
+    chatId,
+    dir,
+    text:     String(text || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 400),
+    ok:       !errorMsg,
+    error:    errorMsg ? String(errorMsg).slice(0, 200) : null,
+    username: k.username || null,
+    tgName:   k.tgName   || null,
+  });
+  if (msgLog.length > LOG_MAX) msgLog.splice(0, msgLog.length - LOG_MAX);
+  saveDbDebounced();
+}
+
+// Ghi nhật ký gửi vào chính bản ghi của khách: đếm số tin, giờ gửi cuối, nội
+// dung tin cuối và lỗi gần nhất (khách chặn bot / xoá chat sẽ báo lỗi ở đây).
+function logSend(chatId, text, errorMsg) {
+  const k = knownUsers.get(chatId);
+  if (!k) return; // tin gửi cho người chưa liên kết thì không cần lưu
+  if (errorMsg) {
+    k.lastError   = String(errorMsg).slice(0, 200);
+    k.lastErrorAt = Date.now();
+  } else {
+    k.sentCount    = (k.sentCount || 0) + 1;
+    k.lastSentAt   = Date.now();
+    k.lastSentText = String(text || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 140);
+    k.lastError    = null;
+  }
+  saveDbDebounced();
+}
+
 async function tgSend(chatId, text, extra = {}) {
   try {
     await axios.post(`${api()}/sendMessage`, {
       chat_id: chatId, text, parse_mode: "HTML", ...extra,
     }, { timeout: 15_000 });
+    logSend(chatId, text, null);
+    pushLog(chatId, "out", text, null);
+    logger.info("Follow tgSend ok", { chatId });
   } catch (e) {
+    const err = e.response?.data?.description || e.message;
+    logSend(chatId, text, err);
+    pushLog(chatId, "out", text, err);
     logger.error("Follow tgSend failed", { chatId, error: e.response?.data || e.message });
   }
 }
@@ -444,6 +503,19 @@ async function handleWebhook(update) {
   const chatId = msg.chat.id;
   const text   = msg.text.trim();
 
+  // Ghi lại danh tính Telegram để admin biết bot đang nhắn với ai
+  // (chatId là số, nhìn không ra khách nào).
+  const from = msg.from || {};
+  const tgName = [from.first_name, from.last_name].filter(Boolean).join(" ").trim();
+  const known0 = knownUsers.get(chatId);
+  if (known0) {
+    if (tgName) known0.tgName = tgName;
+    if (from.username) known0.tgUsername = from.username;
+  }
+  pendingTgProfile.set(chatId, { tgName, tgUsername: from.username || null });
+
+  pushLog(chatId, "in", text, null); // tin khách nhắn vào
+
   if (text.startsWith("/start")) {
     const token = text.split(/\s+/)[1];
 
@@ -505,15 +577,25 @@ async function handleWebhook(update) {
 
 // ── Admin: xem ai đang được liên kết theo dõi ───────────────────────────────────
 function getAll() {
-  return Array.from(knownUsers.entries()).map(([chatId, v]) => ({
-    chatId,
-    username:        v.username,
-    transferContent: v.transferContent,
-    rootId:          v.rootId,
-    lastStatus:      v.lastStatus,
-    lastNote:        v.lastNote,
-    updatedAt:       new Date(v.updatedAt).toISOString(),
-  }));
+  const iso = t => (t ? new Date(t).toISOString() : null);
+  return Array.from(knownUsers.entries())
+    .map(([chatId, v]) => ({
+      chatId,
+      tgName:          v.tgName     || null,
+      tgUsername:      v.tgUsername || null,
+      username:        v.username,
+      transferContent: v.transferContent,
+      rootId:          v.rootId,
+      lastStatus:      v.lastStatus,
+      lastNote:        v.lastNote,
+      sentCount:       v.sentCount  || 0,
+      lastSentAt:      iso(v.lastSentAt),
+      lastSentText:    v.lastSentText || null,
+      lastError:       v.lastError    || null,
+      lastErrorAt:     iso(v.lastErrorAt),
+      updatedAt:       iso(v.updatedAt),
+    }))
+    .sort((a, b) => (b.lastSentAt || "").localeCompare(a.lastSentAt || ""));
 }
 
 // ── Khởi động (gọi trong app.listen của server.js) ───────────────────────────────
@@ -558,11 +640,141 @@ async function start(publicUrl) {
   logger.info("Follow module started (chế độ CS xác nhận tay, không còn polling BO)");
 }
 
+// ── Lịch sử tin nhắn ──────────────────────────────────────────────────────────
+// chatId để trống = lấy tất cả. Trả về mới nhất trước.
+function getLog(chatId, limit) {
+  const max = limit || 500;
+  let rows = msgLog;
+  if (chatId != null && chatId !== "") {
+    rows = rows.filter(r => String(r.chatId) === String(chatId));
+  }
+  return rows.slice(-max).reverse().map(r => ({
+    ...r, at: new Date(r.at).toISOString(),
+  }));
+}
+
+function renderLogHtml(key, chatId) {
+  const rows = getLog(chatId, 500);
+  const esc = v => String(v == null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const vn = t => new Date(t).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+  const q  = encodeURIComponent(key || "");
+
+  const who = chatId
+    ? (rows[0] ? `${esc(rows[0].tgName || "—")} · tài khoản <b>${esc(rows[0].username || "—")}</b> · id ${esc(chatId)}`
+               : `id ${esc(chatId)}`)
+    : "Tất cả khách";
+
+  const body = rows.length ? rows.map(r => `
+    <tr class="${r.dir === "in" ? "in" : "out"}${r.error ? " err" : ""}">
+      <td class="t">${vn(r.at)}</td>
+      <td class="d">${r.dir === "in" ? "⬅ khách" : "➡ bot"}</td>
+      ${chatId ? "" : `<td><b>${esc(r.username || "—")}</b><div class="sub">${esc(r.tgName || "")} · id ${esc(r.chatId)}</div></td>`}
+      <td>${esc(r.text)}${r.error ? `<div class="badge">${esc(r.error)}</div>` : ""}</td>
+    </tr>`).join("") : `<tr><td colspan="4" class="empty">Chưa có tin nhắn nào.</td></tr>`;
+
+  return `<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lịch sử tin nhắn bot</title><style>
+body{margin:0;padding:20px;background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#1a1d2e}
+h1{font-size:19px;margin:0 0 4px}
+.meta{font-size:12px;color:#9098b8;margin-bottom:14px}
+a.back{display:inline-block;margin-bottom:14px;font-size:13px;color:#4f8ef7;text-decoration:none}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.05)}
+th{background:#f0f1f6;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5a6080;text-align:left;padding:10px 12px}
+td{padding:9px 12px;border-top:1px solid rgba(0,0,0,.06);font-size:13px;vertical-align:top}
+td.t{white-space:nowrap;color:#9098b8;font-size:12px}
+td.d{white-space:nowrap;font-size:12px;font-weight:600}
+tr.in{background:rgba(79,142,247,.05)}
+tr.in td.d{color:#4f8ef7}
+tr.out td.d{color:#16a870}
+tr.err{background:rgba(232,25,44,.05)}
+.sub{font-size:11px;color:#9098b8;margin-top:2px}
+.badge{display:inline-block;margin-top:4px;background:rgba(232,25,44,.1);color:#e8192c;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:600}
+.empty{text-align:center;color:#9098b8;padding:28px}
+</style></head><body>
+<a class="back" href="/admin/follow/view?key=${q}">← Về danh sách khách</a>
+<h1>Lịch sử tin nhắn</h1>
+<div class="meta">${who} · ${rows.length} dòng gần nhất · giữ tối đa ${LOG_MAX} dòng</div>
+<table>
+  <tr><th>Thời gian</th><th>Chiều</th>${chatId ? "" : "<th>Khách</th>"}<th>Nội dung</th></tr>
+  ${body}
+</table>
+</body></html>`;
+}
+
+// ── Trang xem nhanh cho admin (GET /admin/follow/view) ────────────────────────
+function renderHtml(key) {
+  const rows = getAll();
+  const q = encodeURIComponent(key || "");
+  const esc = v => String(v == null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const vn = t => t
+    ? new Date(t).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })
+    : "—";
+
+  const totalSent = rows.reduce((n, r) => n + r.sentCount, 0);
+  const errCount  = rows.filter(r => r.lastError).length;
+  const neverSent = rows.filter(r => r.sentCount === 0).length;
+
+  const body = rows.length ? rows.map(r => `
+    <tr class="${r.lastError ? "err" : ""}">
+      <td>${esc(r.tgName || "—")}${r.tgUsername ? `<div class="sub">@${esc(r.tgUsername)}</div>` : ""}
+          <div class="sub">id ${esc(r.chatId)}</div></td>
+      <td><b>${esc(r.username)}</b><div class="sub">${esc(r.transferContent || "—")}</div></td>
+      <td>${esc(r.lastStatus || "chờ xử lý")}</td>
+      <td class="num">${r.sentCount}</td>
+      <td>${vn(r.lastSentAt)}<div class="sub">${esc(r.lastSentText || "")}</div></td>
+      <td>${r.lastError ? `<span class="badge">${esc(r.lastError)}</span><div class="sub">${vn(r.lastErrorAt)}</div>` : "—"}</td>
+      <td><a class="lnk" href="/admin/follow/log?key=${q}&chat=${esc(r.chatId)}">Xem lịch sử →</a></td>
+    </tr>`).join("") : `<tr><td colspan="7" class="empty">Chưa có khách nào liên kết bot.</td></tr>`;
+
+  return `<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bot theo dõi hóa đơn — nhật ký gửi</title><style>
+body{margin:0;padding:20px;background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#1a1d2e}
+h1{font-size:19px;margin:0 0 4px}
+.meta{font-size:12px;color:#9098b8;margin-bottom:14px}
+.cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.card{background:#fff;border:1px solid rgba(0,0,0,.07);border-radius:12px;padding:12px 16px;min-width:110px}
+.card .n{font-size:22px;font-weight:800}
+.card .l{font-size:11px;color:#5a6080;text-transform:uppercase;letter-spacing:.5px}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.05)}
+th{background:#f0f1f6;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5a6080;text-align:left;padding:10px 12px}
+td{padding:10px 12px;border-top:1px solid rgba(0,0,0,.06);font-size:13px;vertical-align:top}
+.sub{font-size:11px;color:#9098b8;margin-top:2px;overflow-wrap:anywhere}
+.num{text-align:center;font-weight:700}
+tr.err{background:rgba(232,25,44,.04)}
+.badge{background:rgba(232,25,44,.1);color:#e8192c;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:600}
+.empty{text-align:center;color:#9098b8;padding:28px}
+.lnk{color:#4f8ef7;text-decoration:none;font-size:12px;font-weight:600;white-space:nowrap}
+.toplnk{display:inline-block;margin-bottom:14px;font-size:13px;color:#4f8ef7;text-decoration:none}
+</style></head><body>
+<h1>Bot theo dõi hóa đơn — nhật ký gửi</h1>
+<div class="meta">Cập nhật ${vn(Date.now())} · tự tải lại mỗi 30 giây</div>
+<div class="cards">
+  <div class="card"><div class="n">${rows.length}</div><div class="l">Khách liên kết</div></div>
+  <div class="card"><div class="n">${totalSent}</div><div class="l">Tin đã gửi</div></div>
+  <div class="card"><div class="n">${neverSent}</div><div class="l">Chưa nhận tin</div></div>
+  <div class="card"><div class="n" style="color:${errCount ? "#e8192c" : "inherit"}">${errCount}</div><div class="l">Gửi lỗi</div></div>
+</div>
+<a class="toplnk" href="/admin/follow/log?key=${q}">Xem toàn bộ lịch sử tin nhắn →</a>
+<table>
+  <tr><th>Khách Telegram</th><th>Tài khoản / Mã CK</th><th>Trạng thái đơn</th><th>Số tin</th><th>Tin gần nhất</th><th>Lỗi</th><th></th></tr>
+  ${body}
+</table>
+<script>setTimeout(function(){location.reload()},30000)</script>
+</body></html>`;
+}
+
 module.exports = {
   start,
   createFollowLink,
   handleWebhook,
   getAll,
+  getLog,
+  renderHtml,
+  renderLogHtml,
   sendStatusToCustomer,
   // Dùng cho luồng gộp hối thúc + theo dõi (gọi từ server.js)
   getChatIdForToken,

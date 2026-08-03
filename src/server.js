@@ -455,6 +455,12 @@ app.get("/admin/invoice-stats", adminAuth, (_req, res) => {
 });
 
 app.get("/admin/follow", adminAuth, (_req, res) => res.json({ ok: true, follows: follow.getAll() }));
+app.get("/admin/follow/view", adminAuth, (req, res) =>
+  res.type("html").send(follow.renderHtml(req.query.key || req.headers["x-admin-key"])));
+app.get("/admin/follow/log", adminAuth, (req, res) =>
+  res.type("html").send(follow.renderLogHtml(req.query.key || req.headers["x-admin-key"], req.query.chat)));
+app.get("/admin/follow/log.json", adminAuth, (req, res) =>
+  res.json({ ok: true, log: follow.getLog(req.query.chat, parseInt(req.query.limit) || 500) }));
 
 app.post("/admin/cache/warmup", adminAuth, async (req, res) => {
   res.json({ ok: true, message: "Đang warmup cache..." });

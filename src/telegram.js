@@ -269,6 +269,22 @@ function addReply(parentId, childId) {
   replyIndex.set(parentId, ch);
 }
 
+// ── Lần ngược cây reply lên tới tin gốc (tin có trong imageCache) ────────────
+// Trả về entry gốc để lấy followChatId. CS có thể reply nhiều tầng (reply vào
+// reply), nên phải đi lên theo parent_id cho tới khi gặp tin gốc.
+function findRootWithFollow(startId) {
+  let id = Number(startId);
+  const seen = new Set();
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const img = imageCache.get(id);
+    if (img) return img; // tin gốc (ảnh hóa đơn / addManualInvoice) nằm ở imageCache
+    const txt = textCache.get(id);
+    id = txt?.parent_id ? Number(txt.parent_id) : null;
+  }
+  return null;
+}
+
 // ── Lấy status mới nhất theo cached_at (thời gian) ──────────────────────────
 // Dùng cached_at thay vì msgId vì reply từ nhóm T3 có msgId thấp hơn tin gốc CSKH
 function getLatestStatus(rootId) {
@@ -351,7 +367,50 @@ async function indexMessage(msg) {
       saveCache();
       logger.info("Reply indexed", { msgId, parentId, status, note });
     }
+
+    // ── Chuyển reply tay của CS thẳng cho khách ──────────────────────────
+    // Nút "✅ Đã lên điểm" (callback) đã tự báo khách ở nhánh khác. Đây là
+    // trường hợp CS GÕ TAY reply vào tin hóa đơn để giải thích ca đặc biệt
+    // (số tiền không khớp, tạo đơn mới...) — trước đây khách không nhận được.
+    // Chỉ xử lý reply trực tiếp vào tin trong nhóm CS, và chỉ khi tin gốc có
+    // gắn khách theo dõi (followChatId). Bỏ qua tin bot tự gửi và chat nội bộ
+    // không reply vào đâu.
+    if (parentId && !msg.from?.is_bot) {
+      const root = findRootWithFollow(parentId);
+      if (root?.followChatId) {
+        const manualText = (text || "").trim();
+        if (manualText) {
+          maybeForwardManualReply(root, msgId, manualText, status, note);
+        }
+      }
+    }
   }
+}
+
+// Chống gửi trùng: mỗi tin reply của CS chỉ chuyển cho khách 1 lần, kể cả khi
+// Telegram giao update lặp hoặc indexMessage chạy lại.
+const forwardedReplies = new Set();
+
+function maybeForwardManualReply(root, replyMsgId, text, status, note) {
+  if (forwardedReplies.has(replyMsgId)) return;
+  forwardedReplies.add(replyMsgId);
+  if (forwardedReplies.size > 5000) {
+    // gọn bộ nhớ: xoá nửa cũ
+    const arr = [...forwardedReplies];
+    forwardedReplies.clear();
+    for (const id of arr.slice(arr.length / 2)) forwardedReplies.add(id);
+  }
+
+  // Nếu CS gõ đúng câu khớp trạng thái chuẩn (parseReplyText nhận ra status),
+  // gửi kèm ghi chú chuẩn cho gọn. Còn không thì chuyển nguyên văn.
+  const finalStatus = status || null;
+  const finalNote   = note || text;
+
+  logger.info("Forward manual CS reply to customer", {
+    replyMsgId, chatId: root.followChatId, status: finalStatus,
+    preview: text.slice(0, 40),
+  });
+  notifyFollowCustomer(root.followChatId, finalStatus, finalNote);
 }
 
 // ── Tìm theo CK ──────────────────────────────────────────────────────────────

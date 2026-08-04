@@ -427,8 +427,11 @@ async function sendStatusToCustomer(chatId, status, note) {
   const lines = [];
   if (status === "Đã lên điểm") {
     lines.push("✅ <b>Hóa đơn của bạn đã được ghi nhận!</b>");
+  } else if (status) {
+    lines.push(`ℹ️ Cập nhật trạng thái đơn: <b>${escapeHtml(status)}</b>`);
   } else {
-    lines.push(`ℹ️ Cập nhật trạng thái đơn: <b>${escapeHtml(status || "-")}</b>`);
+    // CS gõ tay reply không khớp trạng thái chuẩn -> chuyển nguyên văn
+    lines.push("💬 <b>Phản hồi từ CSKH:</b>");
   }
   if (note) lines.push(escapeHtml(note));
 
